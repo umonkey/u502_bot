@@ -4,6 +4,9 @@
 start:
 	docker compose run --build bot
 
+shell:
+	docker compose run bot bash
+
 format:
 	cargo fmt --all
 
