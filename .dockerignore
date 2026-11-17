@@ -2,6 +2,7 @@ target/
 .git/
 .github/
 .env
+.secrets/
 task.md
 AGENTS.md
 tags

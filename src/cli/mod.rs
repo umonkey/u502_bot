@@ -15,9 +15,9 @@ pub enum Command {
     Start,
 }
 
-pub fn run() {
+pub async fn run() {
     match Cli::parse().command {
-        Command::Start => start::run(),
+        Command::Start => start::run().await,
     }
 }
 

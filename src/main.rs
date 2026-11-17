@@ -1,6 +1,7 @@
 mod cli;
 mod infra;
 
-fn main() {
-    cli::run();
+#[tokio::main]
+async fn main() {
+    cli::run().await;
 }
