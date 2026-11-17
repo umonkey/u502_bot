@@ -54,7 +54,11 @@ pub async fn run() -> ExitCode {
         tracing::info!(
             chat_id = message.chat.id.0,
             message_id = message.id.0,
-            text = message.text().unwrap_or("<no text>"),
+            kind = message_kind(&message),
+            text = message
+                .text()
+                .or_else(|| message.caption())
+                .unwrap_or("<no text>"),
             "Received message"
         );
         log_media(&message);
@@ -71,7 +75,7 @@ pub async fn run() -> ExitCode {
             Ok(StoreOutcome::Stored) => sentry::message_stored(),
             Ok(StoreOutcome::Duplicate) => {
                 sentry::message_stored();
-                tracing::debug!(
+                tracing::info!(
                     chat_id = message.chat.id.0,
                     message_id = message.id.0,
                     "Skipped an already stored message"
@@ -88,7 +92,7 @@ pub async fn run() -> ExitCode {
                 Ok(AttachmentOutcome::Stored) => sentry::attachment_stored(),
                 Ok(AttachmentOutcome::Duplicate) => {
                     sentry::attachment_stored();
-                    tracing::debug!(
+                    tracing::info!(
                         chat_id = message.chat.id.0,
                         message_id = message.id.0,
                         "Skipped an already stored attachment"
@@ -182,6 +186,35 @@ fn log_media(message: &Message) {
             file_id = %video.file.id,
             "Video received"
         );
+    }
+}
+
+/// Classifies a message into a coarse kind for the log line.
+///
+/// The order mirrors `new_attachment`: the first matching payload wins, so captioned media is
+/// classified by its payload rather than by its caption, and an unrecognised message is
+/// `"other"`.
+fn message_kind(message: &Message) -> &'static str {
+    if message.voice().is_some() {
+        "voice"
+    } else if message.audio().is_some() {
+        "audio"
+    } else if message.video_note().is_some() {
+        "video_note"
+    } else if message.video().is_some() {
+        "video"
+    } else if message.animation().is_some() {
+        "animation"
+    } else if message.photo().is_some() {
+        "photo"
+    } else if message.document().is_some() {
+        "document"
+    } else if message.sticker().is_some() {
+        "sticker"
+    } else if message.text().is_some() {
+        "text"
+    } else {
+        "other"
     }
 }
 

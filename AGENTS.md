@@ -42,7 +42,7 @@ Running `make` without a target executes `check`.
 - `src/infra.rs`: declares the infra modules.
 - `src/infra/config.rs`: `get_secret` and `SecretError`, with `<NAME>_FILE` precedence.
 - `src/infra/database.rs`: `Database`, `DatabaseError`, `database_path`, and `SCHEMA`; the async SQLite client, which opens a pooled connection and applies the embedded schema without knowing any table.
-- `src/infra/sentry.rs`: `SENTRY_DSN`, `init` (the `tracing` subscriber and optional Sentry client), and the `message_received` / `message_stored` metric functions.
+- `src/infra/sentry.rs`: `SENTRY_DSN`, `init` (the `tracing` subscriber, the optional Sentry client, an error layer, and a crate-scoped structured-log layer), and the `message_received` / `message_stored` metric functions.
 - `src/infra/telegram_bot.rs`: `messages` and `Messages`, the Telegram client; it delivers messages and knows nothing about storage.
 - `dev/schema.sql`: initial SQLite schema, embedded at build time and applied on every startup.
 
@@ -96,6 +96,7 @@ Architecture decisions live in `docs/adr/`, one Markdown file per decision, name
 - ADR 0004 records the decision to report errors and metrics to Sentry.
 - ADR 0005 records the decision to store messages in a local SQLite database.
 - ADR 0006 records the decision to store attachment metadata for later processing.
+- ADR 0007 records the decision to send application logs, including message content, to Sentry.
 
 Run `make format-docs` after editing anything under `docs/`.
 
@@ -146,9 +147,9 @@ Messages live in a local SQLite database. The schema is embedded at build time w
 
 ## Observability
 
-Sentry receives every `ERROR`-level `tracing` event and every panic; `RUST_LOG` controls console output only. The command layer records the application counter `telegram.messages.received` once per incoming Telegram message and `telegram.messages.stored` once per successful storage statement, so the gap between them is the number of messages that failed to persist. It records `telegram.attachments.audio` and `telegram.attachments.video` once per received attachment of that family, and `telegram.attachments.stored` once per successful attachment statement, so the gap between them is the number of attachments that failed to persist.
+Sentry receives every `ERROR`-level `tracing` event and every panic as an issue, and every `INFO`-or-higher event from this crate as a structured log; events from dependencies become issues but not logs. `RUST_LOG` controls console output only. The command layer records the application counter `telegram.messages.received` once per incoming Telegram message and `telegram.messages.stored` once per successful storage statement, so the gap between them is the number of messages that failed to persist. It records `telegram.attachments.audio` and `telegram.attachments.video` once per received attachment of that family, and `telegram.attachments.stored` once per successful attachment statement, so the gap between them is the number of attachments that failed to persist.
 
-Message text, chat ids, file ids, MIME types, and usernames are never sent: `send_default_pii` stays off and no metric carries attributes. Without a DSN the integration is disabled and the bot logs a single warning; see Secrets.
+The reported logs include message text, chat ids, sender names, file ids, MIME types, and file names. `send_default_pii` stays off, so the SDK adds no automatic enrichment, and no metric carries attributes. The DSN and the bot token are never logged. Without a DSN the integration is disabled and the bot logs a single warning; see Secrets.
 
 ## Out of scope
 

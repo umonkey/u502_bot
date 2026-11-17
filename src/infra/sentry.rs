@@ -1,11 +1,12 @@
-//! Error reporting and application metrics through Sentry.
+//! Error reporting, application logs, and metrics through Sentry.
 //!
 //! [`init`] installs the global `tracing` subscriber and, when `SENTRY_DSN` resolves to a valid
 //! DSN, a Sentry client. A missing, empty, or invalid DSN only logs a warning: observability must
-//! never keep the bot from running. Only `ERROR` events and panics are reported, so chat text
-//! logged at `INFO` never leaves the host.
+//! never keep the bot from running. Every `ERROR` event and every panic becomes an issue, and every
+//! `INFO`-or-higher event from this crate becomes a structured log, so those logs include the
+//! message content the command layer records.
 
-use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::filter::{FilterExt, LevelFilter, filter_fn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{Layer, filter::EnvFilter};
@@ -14,6 +15,9 @@ use crate::infra::config::get_secret;
 
 /// Environment variable holding the Sentry DSN.
 pub const SENTRY_DSN: &str = "SENTRY_DSN";
+
+/// Log level forwarded to Sentry. Fixed so `RUST_LOG` stays a console-only control.
+const SENTRY_LOG_LEVEL: LevelFilter = LevelFilter::INFO;
 
 /// Application metric counting every incoming Telegram message.
 pub const TELEGRAM_MESSAGES_RECEIVED: &str = "telegram.messages.received";
@@ -47,8 +51,16 @@ pub fn init() -> Option<sentry::ClientInitGuard> {
     };
 
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    let log_filter = SENTRY_LOG_LEVEL.and(filter_fn(|metadata: &tracing::Metadata<'_>| {
+        is_application_target(metadata.target())
+    }));
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer().with_filter(env_filter))
+        .with(
+            guard
+                .as_ref()
+                .map(|_| sentry::integrations::tracing::LogLayer::new().with_filter(log_filter)),
+        )
         .with(guard.as_ref().map(|_| {
             sentry::integrations::tracing::ErrorLayer::new().with_filter(LevelFilter::ERROR)
         }))
@@ -113,9 +125,35 @@ fn parse_dsn(raw: &str) -> Result<Option<sentry::types::Dsn>, sentry::types::Par
     trimmed.parse().map(Some)
 }
 
+/// Returns whether `target` belongs to this crate, so only its events are reported as logs.
+///
+/// The prefix is the binary target's crate name, not the package name: the manifest names the
+/// binary `u502`, so its module paths are `u502::…`.
+fn is_application_target(target: &str) -> bool {
+    match target.strip_prefix(env!("CARGO_CRATE_NAME")) {
+        Some(rest) => rest.is_empty() || rest.starts_with("::"),
+        None => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn application_targets_are_reported() {
+        let application = env!("CARGO_CRATE_NAME");
+        assert!(is_application_target(application));
+        assert!(is_application_target(&format!("{application}::cli::start")));
+    }
+
+    #[test]
+    fn foreign_targets_are_not_reported() {
+        let application = env!("CARGO_CRATE_NAME");
+        assert!(!is_application_target(&format!("{application}_extra")));
+        assert!(!is_application_target("teloxide::dispatching"));
+        assert!(!is_application_target(""));
+    }
 
     #[test]
     fn blank_dsn_is_treated_as_not_configured() {
