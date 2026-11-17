@@ -7,12 +7,18 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
       TELEGRAM_API_TOKEN_FILE: /run/secrets/telegram_api_token
       SENTRY_DSN_FILE: /run/secrets/sentry_dsn
+      OPENROUTER_API_KEY_FILE: /run/secrets/openrouter_api_key
+      # Empty means "use the built-in default"; a host or .env value still overrides it.
+      TRANSCRIBE_MODEL_NAME: ${TRANSCRIBE_MODEL_NAME:-}
+      # Optional: empty transcribes nothing and logs the chat ids it sees; list them to enable audio.
+      TRANSCRIBE_CHATS: ${TRANSCRIBE_CHATS:-}
       DATABASE_PATH: /opt/data/database.sqlite
     volumes:
       - u502_data:/opt/data
     secrets:
       - telegram_api_token
       - sentry_dsn
+      - openrouter_api_key
 
 volumes:
   u502_data:
@@ -22,3 +28,5 @@ secrets:
     file: .secrets/telegram_api_token
   sentry_dsn:
     file: .secrets/sentry_dsn
+  openrouter_api_key:
+    file: .secrets/openrouter_api_key

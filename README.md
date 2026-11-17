@@ -1,6 +1,6 @@
 # u502 Bot
 
-This is a Telegram bot which listens to a chat group and transcribes audio and video messages.
+This is a Telegram bot which listens to a chat group, stores incoming messages, and transcribes audio messages from white-listed chats, replying to each one with its transcript.
 
 ## Installation
 
@@ -11,9 +11,33 @@ The bot runs in a Docker container. You normally run it via Docker Compose; see 
 Configuration options are read from the environment.
 
 - `TELEGRAM_API_TOKEN`: the API token, see <https://t.me/BotFather> command `/newbot`.
-- `SENTRY_DSN`: ingestion token for Sentry to report crashes, errors, logs, and metrics.
-- `DATABASE_PATH`: path of the SQLite file that stores incoming messages and the metadata of their audio and video attachments, kept for later transcription. Required; Compose uses `/opt/data/database.sqlite`.
+- `SENTRY_DSN`: ingestion token for Sentry to report crashes, errors, logs, and metrics. Optional.
+- `OPENROUTER_API_KEY`: key for OpenRouter, which transcribes audio. Required.
+- `TRANSCRIBE_MODEL_NAME`: id of the OpenRouter model used to transcribe. Optional; the default is `google/gemini-2.5-flash`.
+- `TRANSCRIBE_CHATS`: comma-separated numeric ids of the chats whose audio is transcribed. Optional; empty transcribes nothing.
+- `DATABASE_PATH`: path of the SQLite file that stores incoming messages, the metadata of their audio and video attachments, and the replies waiting to be sent. Required; Compose uses `/opt/data/database.sqlite`.
 
-The reported logs include message text, chat and sender identifiers, and media metadata, so point `SENTRY_DSN` at a project whose members may see that content.
+Each secret can also be supplied through the file named by its `_FILE` variant, such as `OPENROUTER_API_KEY_FILE`, which wins when both are set.
+
+The bot refuses to start when `OPENROUTER_API_KEY` is missing: an unconfigured client would fail every transcription with an authentication error while the process looked healthy. An empty `openrouter_api_key` file is not a valid opt-out, unlike an empty `sentry_dsn` file, because an empty value counts as a missing key. Sentry and `TRANSCRIBE_CHATS` stay optional.
+
+`TRANSCRIBE_CHATS` is empty by default, which transcribes nothing. Start the bot, send a voice message to the chat you care about, and read the chat id from the warning the bot logs for the skipped attachment; then add it to `TRANSCRIBE_CHATS`. Audio received before the id is listed is skipped and not transcribed later.
+
+At startup the bot logs the model it will use, for example `Using model google/gemini-2.5-flash to transcribe; override with TRANSCRIBE_MODEL_NAME`, so the model that spends the credits is visible in the logs. Set `TRANSCRIBE_MODEL_NAME` to change it; an empty value falls back to the default.
+
+The reported logs include message text, chat and sender identifiers, media metadata, and transcripts, so point `SENTRY_DSN` at a project whose members may see that content. Audio is downloaded to a temporary file and sent to OpenRouter, and the transcript is stored by Sentry and delivered back to the chat.
 
 The initial schema is embedded in the binary at build time from `dev/schema.sql`, so there is nothing to mount or configure. Compose keeps the database in the `u502_data` named volume, so removing the container does not lose stored messages.
+
+## Running with Compose
+
+Compose needs `.secrets/telegram_api_token`, `.secrets/sentry_dsn` (which may be empty to disable Sentry), and `.secrets/openrouter_api_key`. Without the token or the key `docker compose up` fails before the container starts. `TRANSCRIBE_CHATS` is optional and can be added later, once the ids are known.
+
+```bash
+mkdir -p .secrets
+printf '%s' "$OPENROUTER_API_KEY" > .secrets/openrouter_api_key
+chmod 600 .secrets/openrouter_api_key
+TRANSCRIBE_CHATS=-1001234567890 docker compose up
+```
+
+`TRANSCRIBE_MODEL_NAME` is passed through when it is set and left empty otherwise, which means the built-in default.

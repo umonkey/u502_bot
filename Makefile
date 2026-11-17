@@ -1,8 +1,11 @@
-.PHONY: format test lint check tags format-docs
+.PHONY: start shell format test lint check tags format-docs
 .DEFAULT_GOAL := check
 
+# Removes the one-off container and any orphaned containers when the bot exits, so a stopped run does
+# not linger in `docker compose ps`. Volumes are kept.
 start:
-	docker compose run --build bot
+	trap 'docker compose down --remove-orphans' EXIT; \
+	docker compose run --build --rm bot
 
 shell:
 	docker compose run bot bash
