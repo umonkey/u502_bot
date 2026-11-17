@@ -2,6 +2,8 @@
 
 use teloxide::prelude::*;
 
+use crate::infra::sentry;
+
 /// Long-polls Telegram and logs every incoming message.
 ///
 /// Returns `Err` only when the initial `getMe` call fails, which usually means an invalid token
@@ -20,6 +22,7 @@ pub async fn run(token: String) -> Result<(), teloxide::RequestError> {
 }
 
 async fn handle_message(message: Message) -> ResponseResult<()> {
+    sentry::message_received();
     tracing::info!(
         chat_id = message.chat.id.0,
         message_id = message.id.0,

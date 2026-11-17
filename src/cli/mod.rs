@@ -15,7 +15,7 @@ pub enum Command {
     Start,
 }
 
-pub async fn run() {
+pub async fn run() -> std::process::ExitCode {
     match Cli::parse().command {
         Command::Start => start::run().await,
     }

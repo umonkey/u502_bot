@@ -48,6 +48,8 @@ Running `make` without a target executes `check`.
 
 - `src/infra/config.rs`: `get_secret` and `SecretError`, with `<NAME>_FILE` precedence.
 
+- `src/infra/sentry.rs`: `SENTRY_DSN`, `init` (the `tracing` subscriber and optional Sentry client), and `message_received`.
+
 - `src/infra/telegram_bot.rs`: `run` and `handle_message`, the long-polling loop.
 
 Add every new subcommand as a variant of the `Command` enum in `src/cli/mod.rs`, route it from `run()`, and implement it in `src/cli/<command>.rs`.
@@ -77,7 +79,7 @@ docker run --rm u502_bot
 
 `compose.yaml` defines a single `bot` service. It builds from this checkout when given `--build`, and otherwise pulls the published image. `RUST_LOG` defaults to `info` and can be overridden through the environment.
 
-Compose reads the token from `.secrets/telegram_api_token`, so `docker compose up` fails immediately until that file exists; see Secrets.
+Compose reads the token from `.secrets/telegram_api_token` and the Sentry DSN from `.secrets/sentry_dsn`, so `docker compose up` fails immediately until both files exist; see Secrets.
 
 ```bash
 docker compose up --build      # build locally and run in the foreground
@@ -92,6 +94,8 @@ Architecture decisions live in `docs/adr/`, one Markdown file per decision, name
 ADR 0001 records the decision to use Rust.
 
 ADR 0003 records the decision to receive updates by long polling.
+
+ADR 0004 records the decision to report errors and metrics to Sentry.
 
 Do not add `docs/adr/README.md` until a second ADR exists.
 
@@ -124,6 +128,29 @@ chmod 600 .secrets/telegram_api_token
 `.secrets/` and `.env` are git-ignored and docker-ignored. Never commit them or copy them into an image.
 
 Never bake tokens into the image or source. The token is read from the environment at runtime.
+
+The Sentry DSN is read the same way, through `get_secret`:
+
+- `SENTRY_DSN`: the DSN itself, convenient for local runs.
+
+- `SENTRY_DSN_FILE`: the path of a file holding the DSN.
+
+- Compose: sets `SENTRY_DSN_FILE=/run/secrets/sentry_dsn` and mounts `.secrets/sentry_dsn` there, so the DSN never enters the container environment or `docker inspect`.
+
+`SENTRY_DSN_FILE` wins when both variables are set. Sentry is optional: a missing, empty, or invalid DSN logs one warning and the bot runs without it. Create the file before running Compose, or leave it empty to opt out:
+
+```bash
+mkdir -p .secrets
+printf '%s' "$SENTRY_DSN" > .secrets/sentry_dsn
+chmod 600 .secrets/sentry_dsn
+: > .secrets/sentry_dsn      # opt out: an empty file disables Sentry
+```
+
+## Observability
+
+Sentry receives every `ERROR`-level `tracing` event and every panic; `RUST_LOG` controls console output only. The application counter `telegram.messages.received` increments once per incoming Telegram message.
+
+Message text, chat ids, and usernames are never sent: `send_default_pii` stays off and the metric carries no attributes. Without a DSN the integration is disabled and the bot logs a single warning; see Secrets.
 
 ## Out of scope
 
