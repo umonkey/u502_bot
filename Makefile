@@ -1,6 +1,9 @@
 .PHONY: format test lint check tags format-docs
 .DEFAULT_GOAL := check
 
+start:
+	docker compose run --build bot
+
 format:
 	cargo fmt --all
 
