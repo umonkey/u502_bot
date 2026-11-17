@@ -1,0 +1,11 @@
+# u502 cron jobs
+#
+# Placeholder for periodic maintenance tasks. Add one job per line in the
+# standard cron.d format (user field first), for example:
+#
+#   0 4 * * * u502 /usr/local/bin/u502 start
+#
+# No jobs are scheduled yet.
+
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin

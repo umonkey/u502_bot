@@ -1,0 +1,7 @@
+services:
+  bot:
+    build: .
+    image: ghcr.io/umonkey/u502_bot:latest
+    restart: unless-stopped
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}

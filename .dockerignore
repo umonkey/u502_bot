@@ -1,0 +1,9 @@
+target/
+.git/
+.github/
+.env
+task.md
+AGENTS.md
+tags
+*.md
+compose.yaml
