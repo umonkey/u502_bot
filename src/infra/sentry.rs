@@ -21,6 +21,15 @@ pub const TELEGRAM_MESSAGES_RECEIVED: &str = "telegram.messages.received";
 /// Application metric counting every message whose storage statement succeeded.
 pub const TELEGRAM_MESSAGES_STORED: &str = "telegram.messages.stored";
 
+/// Application metric counting every received audio (voice or audio) attachment.
+pub const TELEGRAM_ATTACHMENTS_AUDIO: &str = "telegram.attachments.audio";
+
+/// Application metric counting every received video (video or video note) attachment.
+pub const TELEGRAM_ATTACHMENTS_VIDEO: &str = "telegram.attachments.video";
+
+/// Application metric counting every attachment whose storage statement succeeded.
+pub const TELEGRAM_ATTACHMENTS_STORED: &str = "telegram.attachments.stored";
+
 /// Installs logging and optional Sentry reporting.
 ///
 /// The returned guard must be bound for the lifetime of the process; dropping it flushes queued
@@ -64,6 +73,24 @@ pub fn message_received() {
 /// and stored counters is exactly the number of messages that failed to persist.
 pub fn message_stored() {
     sentry::metrics::counter(TELEGRAM_MESSAGES_STORED, 1).capture();
+}
+
+/// Records one received audio (voice or audio) attachment.
+pub fn attachment_audio() {
+    sentry::metrics::counter(TELEGRAM_ATTACHMENTS_AUDIO, 1).capture();
+}
+
+/// Records one received video (video or video note) attachment.
+pub fn attachment_video() {
+    sentry::metrics::counter(TELEGRAM_ATTACHMENTS_VIDEO, 1).capture();
+}
+
+/// Records one attachment whose storage statement succeeded.
+///
+/// A duplicate delivery counts too: the row is already durable, so the gap between the received
+/// and stored counters is exactly the number of attachments that failed to persist.
+pub fn attachment_stored() {
+    sentry::metrics::counter(TELEGRAM_ATTACHMENTS_STORED, 1).capture();
 }
 
 /// Reads the DSN, mapping every failure to a reason to disable reporting.
@@ -118,5 +145,12 @@ mod tests {
     #[test]
     fn stored_metric_is_safe_without_client() {
         message_stored();
+    }
+
+    #[test]
+    fn attachment_metrics_are_safe_without_client() {
+        attachment_audio();
+        attachment_video();
+        attachment_stored();
     }
 }

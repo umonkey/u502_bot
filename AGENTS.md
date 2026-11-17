@@ -37,6 +37,7 @@ Running `make` without a target executes `check`.
 - `src/cli/mod.rs`: defines the clap `Command` enum, parses arguments, and routes each variant.
 - `src/cli/<command>.rs`: one module per subcommand; `src/cli/start.rs` composes the clients and the repository.
 - `src/domains.rs`: declares the domain modules.
+- `src/domains/attachment.rs`: the attachment model and the repository that owns the `attachments` SQL.
 - `src/domains/message.rs`: the message model and the repository that owns the `messages` SQL.
 - `src/infra.rs`: declares the infra modules.
 - `src/infra/config.rs`: `get_secret` and `SecretError`, with `<NAME>_FILE` precedence.
@@ -89,17 +90,12 @@ docker compose up -d           # start detached
 
 Architecture decisions live in `docs/adr/`, one Markdown file per decision, named `NNNN-slug.md`.
 
-ADR 0001 records the decision to use Rust.
-
-ADR 0002 records the decision to read secrets from the environment or from a file.
-
-ADR 0003 records the decision to receive updates by long polling.
-
-ADR 0004 records the decision to report errors and metrics to Sentry.
-
-ADR 0005 records the decision to store messages in a local SQLite database.
-
-Do not add `docs/adr/README.md` until a second ADR exists.
+- ADR 0001 records the decision to use Rust.
+- ADR 0002 records the decision to read secrets from the environment or from a file.
+- ADR 0003 records the decision to receive updates by long polling.
+- ADR 0004 records the decision to report errors and metrics to Sentry.
+- ADR 0005 records the decision to store messages in a local SQLite database.
+- ADR 0006 records the decision to store attachment metadata for later processing.
 
 Run `make format-docs` after editing anything under `docs/`.
 
@@ -146,13 +142,13 @@ chmod 600 .secrets/sentry_dsn
 
 ## Storage
 
-Messages live in a local SQLite database. The schema is embedded at build time with `include_str!` from `dev/schema.sql` and applied on every startup, so there is no schema path or environment variable to configure. The database is opened asynchronously at startup and accessed through the message repository in `src/domains/message.rs`. The database path comes from `DATABASE_PATH`, which is ordinary configuration read with `std::env`, not a secret and therefore not through `get_secret`; it is required, so a missing value fails startup, and Compose sets it to `/opt/data/database.sqlite`. The command stores every delivered message in `messages` and skips a redelivery by its `(chat_id, message_id)` uniqueness.
+Messages live in a local SQLite database. The schema is embedded at build time with `include_str!` from `dev/schema.sql` and applied on every startup, so there is no schema path or environment variable to configure. The database is opened asynchronously at startup and accessed through the message repository in `src/domains/message.rs` and the attachment repository in `src/domains/attachment.rs`. The database path comes from `DATABASE_PATH`, which is ordinary configuration read with `std::env`, not a secret and therefore not through `get_secret`; it is required, so a missing value fails startup, and Compose sets it to `/opt/data/database.sqlite`. The command stores every delivered message in `messages` and skips a redelivery by its `(chat_id, message_id)` uniqueness. Every incoming audio or video message also records one row in `attachments`, keyed by the same `(chat_id, message_id)` pair, holding the Telegram `file_id`, the MIME type, the duration, the size, and a `transcribed` flag. Nothing is downloaded yet: the row is what a later worker needs to fetch and transcribe the file, and a partial index serves the future pending scan.
 
 ## Observability
 
-Sentry receives every `ERROR`-level `tracing` event and every panic; `RUST_LOG` controls console output only. The command layer records the application counter `telegram.messages.received` once per incoming Telegram message and `telegram.messages.stored` once per successful storage statement, so the gap between them is the number of messages that failed to persist.
+Sentry receives every `ERROR`-level `tracing` event and every panic; `RUST_LOG` controls console output only. The command layer records the application counter `telegram.messages.received` once per incoming Telegram message and `telegram.messages.stored` once per successful storage statement, so the gap between them is the number of messages that failed to persist. It records `telegram.attachments.audio` and `telegram.attachments.video` once per received attachment of that family, and `telegram.attachments.stored` once per successful attachment statement, so the gap between them is the number of attachments that failed to persist.
 
-Message text, chat ids, and usernames are never sent: `send_default_pii` stays off and neither metric carries attributes. Without a DSN the integration is disabled and the bot logs a single warning; see Secrets.
+Message text, chat ids, file ids, MIME types, and usernames are never sent: `send_default_pii` stays off and no metric carries attributes. Without a DSN the integration is disabled and the bot logs a single warning; see Secrets.
 
 ## Out of scope
 

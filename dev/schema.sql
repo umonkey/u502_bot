@@ -10,3 +10,18 @@ CREATE TABLE IF NOT EXISTS messages (
     message TEXT,
     UNIQUE (chat_id, message_id)
 );
+
+CREATE TABLE IF NOT EXISTS attachments (
+    id INTEGER PRIMARY KEY,
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    kind TEXT NOT NULL, -- 'audio' or 'video'
+    file_id TEXT NOT NULL,
+    mime_type TEXT,
+    duration_seconds INTEGER,
+    file_size INTEGER,
+    transcribed INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (chat_id, message_id)
+);
+
+CREATE INDEX IF NOT EXISTS attachments_pending ON attachments (id) WHERE transcribed = 0;

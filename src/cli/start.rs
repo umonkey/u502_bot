@@ -2,6 +2,9 @@ use std::process::ExitCode;
 
 use teloxide::types::{Message, User};
 
+use crate::domains::attachment::{
+    AttachmentKind, AttachmentRepository, NewAttachment, StoreOutcome as AttachmentOutcome,
+};
 use crate::domains::message::{MessageRepository, NewMessage, StoreOutcome};
 use crate::infra::{config::get_secret, database, sentry, telegram_bot};
 
@@ -33,6 +36,7 @@ pub async fn run() -> ExitCode {
         }
     };
     let repository = MessageRepository::new(database.pool().clone());
+    let attachments = AttachmentRepository::new(database.pool().clone());
 
     let mut messages = match telegram_bot::messages(token).await {
         Ok(messages) => messages,
@@ -55,6 +59,14 @@ pub async fn run() -> ExitCode {
         );
         log_media(&message);
 
+        let attachment = new_attachment(&message);
+        if let Some(attachment) = &attachment {
+            match attachment.kind {
+                AttachmentKind::Audio => sentry::attachment_audio(),
+                AttachmentKind::Video => sentry::attachment_video(),
+            }
+        }
+
         match repository.store(&new_message(&message)).await {
             Ok(StoreOutcome::Stored) => sentry::message_stored(),
             Ok(StoreOutcome::Duplicate) => {
@@ -69,6 +81,24 @@ pub async fn run() -> ExitCode {
                 error = &error as &dyn std::error::Error,
                 "Failed to store the message"
             ),
+        }
+
+        if let Some(attachment) = &attachment {
+            match attachments.store(attachment).await {
+                Ok(AttachmentOutcome::Stored) => sentry::attachment_stored(),
+                Ok(AttachmentOutcome::Duplicate) => {
+                    sentry::attachment_stored();
+                    tracing::debug!(
+                        chat_id = message.chat.id.0,
+                        message_id = message.id.0,
+                        "Skipped an already stored attachment"
+                    );
+                }
+                Err(error) => tracing::error!(
+                    error = &error as &dyn std::error::Error,
+                    "Failed to store the attachment"
+                ),
+            }
         }
     }
 
@@ -108,6 +138,22 @@ fn log_media(message: &Message) {
             file_size = voice.file.size,
             file_id = %voice.file.id,
             "Voice message received"
+        );
+    } else if let Some(audio) = message.audio() {
+        let mime_type = audio
+            .mime_type
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "<unknown>".to_owned());
+        let file_name = audio.file_name.as_deref().unwrap_or("<unknown>");
+        tracing::info!(
+            sender = sender.as_str(),
+            duration_seconds = audio.duration.seconds(),
+            file_name = file_name,
+            mime_type = mime_type.as_str(),
+            file_size = audio.file.size,
+            file_id = %audio.file.id,
+            "Audio received"
         );
     } else if let Some(video_note) = message.video_note() {
         tracing::info!(
@@ -154,5 +200,56 @@ fn new_message(message: &Message) -> NewMessage {
             .text()
             .or_else(|| message.caption())
             .map(str::to_owned),
+    }
+}
+
+/// Maps a media payload to the attachment the repository stores.
+///
+/// Telegram delivers at most one media payload per message, so the first match wins. Anything else,
+/// including text, photos, documents, and stickers, carries no attachment.
+fn new_attachment(message: &Message) -> Option<NewAttachment> {
+    let chat_id = message.chat.id.0;
+    let message_id = i64::from(message.id.0);
+
+    if let Some(voice) = message.voice() {
+        Some(NewAttachment {
+            chat_id,
+            message_id,
+            kind: AttachmentKind::Audio,
+            file_id: voice.file.id.to_string(),
+            mime_type: voice.mime_type.as_ref().map(ToString::to_string),
+            duration_seconds: Some(i64::from(voice.duration.seconds())),
+            file_size: Some(i64::from(voice.file.size)),
+        })
+    } else if let Some(audio) = message.audio() {
+        Some(NewAttachment {
+            chat_id,
+            message_id,
+            kind: AttachmentKind::Audio,
+            file_id: audio.file.id.to_string(),
+            mime_type: audio.mime_type.as_ref().map(ToString::to_string),
+            duration_seconds: Some(i64::from(audio.duration.seconds())),
+            file_size: Some(i64::from(audio.file.size)),
+        })
+    } else if let Some(video_note) = message.video_note() {
+        Some(NewAttachment {
+            chat_id,
+            message_id,
+            kind: AttachmentKind::Video,
+            file_id: video_note.file.id.to_string(),
+            mime_type: None,
+            duration_seconds: Some(i64::from(video_note.duration.seconds())),
+            file_size: Some(i64::from(video_note.file.size)),
+        })
+    } else {
+        message.video().map(|video| NewAttachment {
+            chat_id,
+            message_id,
+            kind: AttachmentKind::Video,
+            file_id: video.file.id.to_string(),
+            mime_type: video.mime_type.as_ref().map(ToString::to_string),
+            duration_seconds: Some(i64::from(video.duration.seconds())),
+            file_size: Some(i64::from(video.file.size)),
+        })
     }
 }

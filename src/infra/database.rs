@@ -185,6 +185,11 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn schema_contains_the_attachments_table() {
+        assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS attachments"));
+    }
+
+    #[tokio::test]
     async fn missing_database_path_is_an_error() {
         let error = resolve_database_path(|_| Err(VarError::NotPresent))
             .expect_err("missing database path should not resolve");
