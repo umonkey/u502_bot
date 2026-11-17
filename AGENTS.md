@@ -99,4 +99,4 @@ Never bake tokens into the image or source. The future bot token is read from en
 
 ## Out of scope
 
-`task.md` describes the eventual echo bot, which should echo every message back to its sender. It is not implemented yet; the current binary only provides CLI scaffolding.
+- Project level skills live in `.agents/skills`.
