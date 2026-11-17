@@ -53,6 +53,7 @@ pub async fn run() -> ExitCode {
             text = message.text().unwrap_or("<no text>"),
             "Received message"
         );
+        log_media(&message);
 
         match repository.store(&new_message(&message)).await {
             Ok(StoreOutcome::Stored) => sentry::message_stored(),
@@ -83,6 +84,59 @@ async fn init_database() -> Result<database::Database, database::DatabaseError> 
     tracing::info!("Using database {}", path.display());
 
     Ok(database)
+}
+
+/// Logs the media payloads whose content is not text, so an incoming voice note or video is visible
+/// even though it stores no message body.
+fn log_media(message: &Message) {
+    let sender = message
+        .from
+        .as_ref()
+        .map(User::full_name)
+        .unwrap_or_else(|| "<unknown>".to_owned());
+
+    if let Some(voice) = message.voice() {
+        let mime_type = voice
+            .mime_type
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "<unknown>".to_owned());
+        tracing::info!(
+            sender = sender.as_str(),
+            duration_seconds = voice.duration.seconds(),
+            mime_type = mime_type.as_str(),
+            file_size = voice.file.size,
+            file_id = %voice.file.id,
+            "Voice message received"
+        );
+    } else if let Some(video_note) = message.video_note() {
+        tracing::info!(
+            sender = sender.as_str(),
+            duration_seconds = video_note.duration.seconds(),
+            length = video_note.length,
+            file_size = video_note.file.size,
+            file_id = %video_note.file.id,
+            "Video message received"
+        );
+    } else if let Some(video) = message.video() {
+        let mime_type = video
+            .mime_type
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "<unknown>".to_owned());
+        let file_name = video.file_name.as_deref().unwrap_or("<unknown>");
+        tracing::info!(
+            sender = sender.as_str(),
+            duration_seconds = video.duration.seconds(),
+            width = video.width,
+            height = video.height,
+            file_name = file_name,
+            mime_type = mime_type.as_str(),
+            file_size = video.file.size,
+            file_id = %video.file.id,
+            "Video received"
+        );
+    }
 }
 
 /// Maps a Telegram message to the row the repository stores.
