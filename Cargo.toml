@@ -19,7 +19,8 @@ sentry = { version = "0.49", default-features = false, features = [
     "ureq",
     "rustls",
 ] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
 teloxide = { version = "0.17", default-features = false, features = ["rustls"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

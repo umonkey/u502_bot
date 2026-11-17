@@ -7,9 +7,15 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
       TELEGRAM_API_TOKEN_FILE: /run/secrets/telegram_api_token
       SENTRY_DSN_FILE: /run/secrets/sentry_dsn
+      DATABASE_PATH: /opt/data/database.sqlite
+    volumes:
+      - u502_data:/opt/data
     secrets:
       - telegram_api_token
       - sentry_dsn
+
+volumes:
+  u502_data:
 
 secrets:
   telegram_api_token:

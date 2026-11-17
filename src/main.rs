@@ -1,4 +1,5 @@
 mod cli;
+mod domains;
 mod infra;
 
 #[tokio::main]

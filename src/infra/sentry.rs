@@ -18,6 +18,9 @@ pub const SENTRY_DSN: &str = "SENTRY_DSN";
 /// Application metric counting every incoming Telegram message.
 pub const TELEGRAM_MESSAGES_RECEIVED: &str = "telegram.messages.received";
 
+/// Application metric counting every message whose storage statement succeeded.
+pub const TELEGRAM_MESSAGES_STORED: &str = "telegram.messages.stored";
+
 /// Installs logging and optional Sentry reporting.
 ///
 /// The returned guard must be bound for the lifetime of the process; dropping it flushes queued
@@ -53,6 +56,14 @@ pub fn init() -> Option<sentry::ClientInitGuard> {
 /// Records one received Telegram message.
 pub fn message_received() {
     sentry::metrics::counter(TELEGRAM_MESSAGES_RECEIVED, 1).capture();
+}
+
+/// Records one Telegram message whose storage statement succeeded.
+///
+/// A duplicate delivery counts too: the row is already durable, so the gap between the received
+/// and stored counters is exactly the number of messages that failed to persist.
+pub fn message_stored() {
+    sentry::metrics::counter(TELEGRAM_MESSAGES_STORED, 1).capture();
 }
 
 /// Reads the DSN, mapping every failure to a reason to disable reporting.
@@ -102,5 +113,10 @@ mod tests {
     #[test]
     fn message_received_is_safe_without_client() {
         message_received();
+    }
+
+    #[test]
+    fn stored_metric_is_safe_without_client() {
+        message_stored();
     }
 }
