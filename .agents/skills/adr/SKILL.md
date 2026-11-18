@@ -34,6 +34,23 @@ reference allowed is a supersession, expressed in `Status` as
 - `## Alternatives considered`: what was rejected and why.
 - `## Revisit` (optional): the trigger that should reopen the decision.
 
+## Be concise
+
+An ADR is read to learn why something is the way it is, not to review the
+discussion. Aim for well under a page: one short paragraph per narrative
+section, and no more than a few bullets.
+
+- State the decision once, in `## Decision`; do not restate it in Context
+  or rephrase it as a benefit in Consequences.
+- Keep only the trade-offs a reader would act on, and use plain bullets
+  rather than positive, negative, and neutral groupings unless that split
+  carries meaning.
+- One line per alternative: what it was and why it was rejected.
+- Omit any section that carries no information; `Revisit` stays only when it
+  names a real trigger.
+- Prefer deleting a sentence to shortening it, and drop any paragraph that
+  restates an earlier one.
+
 ## Keep it high level
 
 An ADR records the problem, the forces at play, the choice made, the trade-offs
