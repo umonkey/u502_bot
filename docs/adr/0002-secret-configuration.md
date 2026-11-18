@@ -2,7 +2,7 @@
 
 - Status: accepted
 - Date: 2026-11-17
-- Amended: 2026-11-18, so the direct-or-file rule covers every configuration variable, not only secrets
+- Amended: 2026-11-18, so the direct-or-file rule covers every configuration variable, not only secrets; the ffmpeg binary was dropped from the configuration surface because the program is now resolved through `PATH`
 
 ## Context
 
@@ -41,8 +41,6 @@ file form.
   value for every variable, not only the secrets
 - paths with meaningful surrounding whitespace are no longer representable, so an operator has to
   encode around the trimming
-- a non-UTF-8 `FFMPEG_PATH` logs one warning and falls back to the `ffmpeg` on `PATH`, which may be a
-  different binary than intended
 - `<NAME>_FILE` no longer marks a value as sensitive, so the guidance to prefer the file form for the
   token, the key, and the DSN lives in `docs/features/configuration/README.md`; the environment is
   rendered by `docker inspect` and inherited by child processes such as `ffmpeg`, while a mounted file

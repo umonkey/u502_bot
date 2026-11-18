@@ -14,12 +14,10 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::infra::config::get_optional;
 use crate::infra::sentry;
-use crate::shared::config::VariableName;
 use crate::shared::result::{Error, Result};
 
-/// Binary used when [`VariableName::FfmpegPath`] is unset or cannot be read.
+/// Program name looked up on the inherited `PATH`.
 const DEFAULT_FFMPEG: &str = "ffmpeg";
 
 /// Extraction timeout: a safety net for a pathological input, not a working constraint.
@@ -37,27 +35,6 @@ impl Ffmpeg {
     /// Builds a client for the given binary.
     pub fn new(binary: PathBuf) -> Self {
         Self { binary }
-    }
-
-    /// Builds a client from [`VariableName::FfmpegPath`], falling back to [`DEFAULT_FFMPEG`] when
-    /// the variable is unset or unusable.
-    ///
-    /// An unusable value, whether non-Unicode or an unreadable `FFMPEG_PATH_FILE`, logs one warning
-    /// and falls back: a broken path setting must not keep the bot from starting. [`Self::probe`]
-    /// reports the fallback binary's own failure separately.
-    pub fn from_env() -> Self {
-        let binary = match get_optional(VariableName::FfmpegPath) {
-            Ok(raw) => resolve_binary(raw),
-            Err(error) => {
-                tracing::warn!(
-                    error = &error as &dyn std::error::Error,
-                    "FFMPEG_PATH could not be read; falling back to the {DEFAULT_FFMPEG} on PATH"
-                );
-                PathBuf::from(DEFAULT_FFMPEG)
-            }
-        };
-
-        Self::new(binary)
     }
 
     /// Reports whether the binary runs.
@@ -130,21 +107,18 @@ impl Ffmpeg {
     }
 }
 
+impl Default for Ffmpeg {
+    fn default() -> Self {
+        Self::new(PathBuf::from(DEFAULT_FFMPEG))
+    }
+}
+
 /// Maps a failure to start the child process onto the error the caller matches on.
 fn spawn_error(source: std::io::Error) -> Error {
     match source.kind() {
         std::io::ErrorKind::NotFound => Error::FfmpegUnavailable(source),
         _ => Error::FfmpegIo(source),
     }
-}
-
-/// Resolves a raw [`VariableName::FfmpegPath`] setting, falling back to [`DEFAULT_FFMPEG`] when it
-/// is absent.
-///
-/// A configured value is returned verbatim: the resolver already trimmed it and rejected blank
-/// values, so a path an operator set on purpose is never rewritten.
-fn resolve_binary(raw: Option<String>) -> PathBuf {
-    raw.map_or_else(|| PathBuf::from(DEFAULT_FFMPEG), PathBuf::from)
 }
 
 /// The argv after the binary name: one pass that maps the first audio stream to Ogg/Opus, 16 kHz
@@ -266,19 +240,6 @@ mod tests {
         let body = "x".repeat(MAX_ERROR_BODY * 2);
         assert_eq!(truncate(&body).chars().count(), MAX_ERROR_BODY);
         assert_eq!(truncate("short"), "short");
-    }
-
-    #[test]
-    fn absent_binary_falls_back_to_the_default() {
-        assert_eq!(resolve_binary(None), PathBuf::from(DEFAULT_FFMPEG));
-    }
-
-    #[test]
-    fn configured_binary_is_kept_verbatim() {
-        assert_eq!(
-            resolve_binary(Some("/opt/ffmpeg/bin/ffmpeg".to_owned())),
-            PathBuf::from("/opt/ffmpeg/bin/ffmpeg")
-        );
     }
 
     #[tokio::test]

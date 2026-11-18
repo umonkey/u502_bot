@@ -8,7 +8,7 @@ An audio attachment is downloaded to a temporary file and sent to OpenRouter unt
 
 ## Video
 
-A video is downloaded the same way, then `ffmpeg` extracts its first audio track into 16 kHz mono Ogg/Opus, and that file follows the audio path. `ffmpeg` ships in the runtime image; `FFMPEG_PATH` points the bot at a different binary, and a value that cannot be used logs one warning and falls back to the `ffmpeg` on `PATH`.
+A video is downloaded the same way, then `ffmpeg` extracts its first audio track into 16 kHz mono Ogg/Opus, and that file follows the audio path. `ffmpeg` ships in the runtime image.
 
 ## Acknowledgement
 

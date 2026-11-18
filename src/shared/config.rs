@@ -23,8 +23,6 @@ pub enum VariableName {
     TranscribeChats,
     /// `TRANSCRIBE_MODEL_NAME`: the transcription model; optional, with a compiled-in default.
     TranscribeModelName,
-    /// `FFMPEG_PATH`: the ffmpeg binary; optional, with a `PATH` lookup as the default.
-    FfmpegPath,
 }
 
 impl VariableName {
@@ -37,7 +35,6 @@ impl VariableName {
             Self::DatabasePath => "DATABASE_PATH",
             Self::TranscribeChats => "TRANSCRIBE_CHATS",
             Self::TranscribeModelName => "TRANSCRIBE_MODEL_NAME",
-            Self::FfmpegPath => "FFMPEG_PATH",
         }
     }
 }
@@ -63,7 +60,6 @@ mod tests {
             (VariableName::DatabasePath, "DATABASE_PATH"),
             (VariableName::TranscribeChats, "TRANSCRIBE_CHATS"),
             (VariableName::TranscribeModelName, "TRANSCRIBE_MODEL_NAME"),
-            (VariableName::FfmpegPath, "FFMPEG_PATH"),
         ];
 
         for (name, key) in cases {

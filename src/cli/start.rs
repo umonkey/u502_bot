@@ -58,11 +58,11 @@ async fn start() -> Result<(), ExitCode> {
 
     tracing::info!(model = %model, "Using model {model} to transcribe; override with TRANSCRIBE_MODEL_NAME");
 
-    let ffmpeg = Ffmpeg::from_env();
+    let ffmpeg = Ffmpeg::default();
     if let Err(error) = ffmpeg.probe().await {
         tracing::warn!(
             error = &error as &dyn std::error::Error,
-            "ffmpeg is not available: video transcription will be skipped; install ffmpeg or set FFMPEG_PATH"
+            "ffmpeg is not available: video transcription will be skipped; install ffmpeg or put it on PATH"
         );
     }
 

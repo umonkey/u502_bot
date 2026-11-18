@@ -18,7 +18,6 @@ Each variable resolves the same way: `<NAME>_FILE` is consulted first, and its c
 | `SENTRY_DSN`            | no       | unset                            | error and log reporting; blank disables it; see [observability](../observability/README.md) |
 | `TRANSCRIBE_CHATS`      | no       | empty, which transcribes nothing | comma-separated chat ids; see [access](../access/README.md)                                 |
 | `TRANSCRIBE_MODEL_NAME` | no       | `google/gemini-3.5-transcribe`   | Speech-to-Text model id; see [transcription](../transcription/README.md)                    |
-| `FFMPEG_PATH`           | no       | the `ffmpeg` on `PATH`           | ffmpeg binary used for video; see [transcription](../transcription/README.md)               |
 | `RUST_LOG`              | no       | `info`                           | console filter only, with no `_FILE` form; see [observability](../observability/README.md)  |
 
 ## Required versus optional
@@ -31,7 +30,7 @@ Prefer the file form for the bot token, the OpenRouter key, and the Sentry DSN: 
 
 ## Startup failures
 
-A missing required value, an unreadable or non-UTF-8 configuration file, and a non-numeric entry in `TRANSCRIBE_CHATS` each fail startup with an error naming the variable or the path, so the supervisor restarts the process and the log shows why. An unusable `FFMPEG_PATH` is the exception: a non-UTF-8 or unreadable value logs one warning and falls back to the `ffmpeg` on `PATH`, which may be a different binary than intended.
+A missing required value, an unreadable or non-UTF-8 configuration file, and a non-numeric entry in `TRANSCRIBE_CHATS` each fail startup with an error naming the variable or the path, so the supervisor restarts the process and the log shows why.
 
 ## Further reading
 

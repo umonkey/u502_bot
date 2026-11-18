@@ -14,7 +14,7 @@ u502_bot is a Rust Telegram bot for a local car community.
 - An OpenRouter API key: required to run `cargo run -- start`, for the same reason. The numeric ids of the chats to transcribe are optional and can be collected from the logs after the bot starts.
 - universal-ctags (optional): required only for `make tags`.
 - Node and `npx` (optional): required only for `make format-docs`.
-- ffmpeg: required to transcribe video; installed in the runtime image, and `FFMPEG_PATH` can point at a different binary. A non-UTF-8 value logs one warning and falls back to the `ffmpeg` on `PATH`. Audio is transcribed without it.
+- ffmpeg: required to transcribe video; installed in the runtime image and found through `PATH`. Audio is transcribed without it.
 - Docker: host only; images are published by CI, not built in this development container.
 
 ## Commands
@@ -46,7 +46,7 @@ Running `make` without a target executes `check`.
 - `src/infra.rs`: declares the infra modules.
 - `src/infra/config.rs`: `get_optional` and `require_secret`; one resolver gives every variable the same form: `<NAME>_FILE` first, then `<NAME>`, the value trimmed, blank meaning unset, UTF-8 only.
 - `src/infra/database.rs`: `Database`, `database_path`, and `SCHEMA`; the async SQLite client, which opens a pooled connection and applies the embedded schema without knowing any table.
-- `src/infra/ffmpeg.rs`: `Ffmpeg`; the client for the `ffmpeg` program, which extracts a video's first audio track to Ogg/Opus under a timeout, kills the child on drop, and records its own call telemetry. The binary path comes from `VariableName::FfmpegPath`; an unusable value, whether non-UTF-8 or an unreadable `FFMPEG_PATH_FILE`, logs one warning and falls back to the `ffmpeg` on `PATH`.
+- `src/infra/ffmpeg.rs`: `Ffmpeg`; the client for the `ffmpeg` program, which extracts a video's first audio track to Ogg/Opus under a timeout, kills the child on drop, and records its own call telemetry. The program is the `ffmpeg` on `PATH`.
 - `src/infra/openrouter.rs`: `OpenRouter`, `model_from_env`, `DEFAULT_TRANSCRIBE_MODEL`, and `AudioFormat`; the Speech-to-Text client for audio transcription, which records its own call telemetry.
 - `src/infra/sentry.rs`: `VariableName::SentryDsn`, `init` (the `tracing` subscriber, the optional Sentry client, an error layer, and a crate-scoped structured-log layer), and the metric functions for messages, attachments, the outbox, OpenRouter, and ffmpeg.
 - `src/infra/signal.rs`: `Signal` and `wait`; the listener for `SIGINT` and, on Unix, `SIGTERM`.
