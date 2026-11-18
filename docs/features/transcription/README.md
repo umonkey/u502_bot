@@ -10,6 +10,10 @@ An audio attachment is downloaded to a temporary file and sent to OpenRouter unt
 
 A video is downloaded the same way, then `ffmpeg` extracts its first audio track into 16 kHz mono Ogg/Opus, and that file follows the audio path. `ffmpeg` ships in the runtime image; `FFMPEG_PATH` points the bot at a different binary, and a value that cannot be used logs one warning and falls back to the `ffmpeg` on `PATH`.
 
+## Acknowledgement
+
+The bot sets the 👀 reaction on a message when it begins transcribing its audio or video, before the download, so the eye appears before the slow part of the work. The reaction is best effort: a failure is logged and the transcription continues. It stays on the message after the transcript is delivered. A chat that does not allow the bot to react only produces a warning.
+
 ## Skipped, not retried
 
 Some attachments are marked processed without a transcript, because a retry could not change the outcome:

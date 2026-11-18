@@ -1,9 +1,10 @@
 //! Telegram client.
 //!
 //! [`Telegram::connect`] opens the connection, [`Telegram::messages`] delivers incoming messages
-//! through a bounded channel, [`Telegram::download`] fetches a file, and [`Telegram::send`] posts a
-//! text reply. Storage, metrics, and domain decisions belong to the caller: this module knows nothing
-//! about a database, a repository, a metric, or message content beyond forwarding it.
+//! through a bounded channel, [`Telegram::download`] fetches a file, [`Telegram::send`] posts a
+//! text reply, and [`Telegram::react`] sets one emoji reaction on a message. Storage, metrics, and
+//! domain decisions belong to the caller: this module knows nothing about a database, a repository,
+//! a metric, or message content beyond forwarding it.
 
 use std::path::Path;
 use std::time::Duration;
@@ -12,7 +13,7 @@ use teloxide::dispatching::ShutdownToken;
 use teloxide::dptree;
 use teloxide::net::Download;
 use teloxide::prelude::*;
-use teloxide::types::{FileId, MessageId, ParseMode, ReplyParameters};
+use teloxide::types::{FileId, MessageId, ParseMode, ReactionType, ReplyParameters};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -151,16 +152,35 @@ impl Telegram {
 
         Ok(())
     }
+
+    /// Sets `emoji` as the bot's reaction on one message.
+    ///
+    /// A bot holds one reaction per message, so repeating the call replaces the previous emoji
+    /// instead of stacking another. A chat may forbid reactions, which is why the caller treats a
+    /// failure as cosmetic.
+    pub async fn react(&self, chat_id: i64, message_id: i64, emoji: &str) -> Result<()> {
+        self.bot
+            .set_message_reaction(ChatId(chat_id), message_id_of(message_id)?)
+            .reaction(vec![ReactionType::Emoji {
+                emoji: emoji.to_owned(),
+            }])
+            .await?;
+
+        Ok(())
+    }
+}
+
+/// Converts a stored message id to the width the Bot API carries, rejecting one it cannot.
+fn message_id_of(id: i64) -> Result<MessageId> {
+    let message_id = i32::try_from(id).map_err(|_| Error::MessageIdOutOfRange(id))?;
+
+    Ok(MessageId(message_id))
 }
 
 /// Maps a reply target to the parameters Telegram needs, rejecting an id it cannot carry.
 fn reply_parameters(reply_to: Option<i64>) -> Result<Option<ReplyParameters>> {
     reply_to
-        .map(|id| {
-            let message_id = i32::try_from(id).map_err(|_| Error::MessageIdOutOfRange(id))?;
-
-            Ok(ReplyParameters::new(MessageId(message_id)))
-        })
+        .map(|id| Ok(ReplyParameters::new(message_id_of(id)?)))
         .transpose()
 }
 
@@ -199,6 +219,24 @@ mod tests {
         let id = i64::from(i32::MAX) + 1;
 
         match reply_parameters(Some(id)) {
+            Err(Error::MessageIdOutOfRange(reported)) => assert_eq!(reported, id),
+            other => panic!("expected a message id error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_small_message_id_converts_for_a_reaction() {
+        assert_eq!(
+            message_id_of(42).expect("a small message id is valid"),
+            MessageId(42)
+        );
+    }
+
+    #[test]
+    fn a_message_id_beyond_the_telegram_range_is_rejected_with_its_value() {
+        let id = i64::from(i32::MAX) + 1;
+
+        match message_id_of(id) {
             Err(Error::MessageIdOutOfRange(reported)) => assert_eq!(reported, id),
             other => panic!("expected a message id error, got {other:?}"),
         }

@@ -5,7 +5,9 @@
 //! old. An audio attachment is downloaded as-is and sent to OpenRouter's Speech-to-Text API; a video
 //! attachment is downloaded, its audio track is extracted with ffmpeg, and the resulting Ogg joins
 //! the audio flow. Either way the transcript is queued in the outbox and the attachment is marked
-//! processed.
+//! processed. The bot also reacts to the message with 👀 when it picks the attachment up, so the
+//! chat sees work in progress; a reaction that fails only logs a warning, because it must never
+//! cost a transcript.
 //!
 //! The one-hour window bounds both cost and retries: a file that keeps failing is retried on every
 //! scan until its message ages out, and then left alone. [`VariableName::TranscribeChats`] limits
@@ -39,6 +41,12 @@ const BATCH: i64 = 10;
 /// The Bot API refuses `getFile` above 20 MB, so a larger attachment can never be downloaded; it is
 /// skipped and marked processed instead of failing once per scan for the length of the window.
 const MAX_DOWNLOAD_BYTES: i64 = 20 * 1024 * 1024;
+
+/// Reaction set on a message as soon as its attachment is picked up.
+///
+/// It marks pickup before the download and the model call, which are the slow part, so a chat can
+/// tell a queued attachment from one the bot never saw.
+const PROCESSING_REACTION: &str = "👀";
 
 /// Pause after a scan that found nothing, or that could not do any work.
 const IDLE: Duration = Duration::from_secs(5);
@@ -246,6 +254,24 @@ impl Transcriber {
             );
 
             return self.mark_processed(&attachment).await;
+        }
+
+        let reacted = tokio::select! {
+            result = self.telegram.react(
+                attachment.chat_id,
+                attachment.message_id,
+                PROCESSING_REACTION,
+            ) => result,
+            () = shutdown.wait() => return false,
+        };
+        if let Err(error) = reacted {
+            tracing::warn!(
+                attachment_id = attachment.id,
+                chat_id = attachment.chat_id,
+                message_id = attachment.message_id,
+                error = &error as &dyn std::error::Error,
+                "Failed to react to a message: the transcript is unaffected"
+            );
         }
 
         match attachment.kind {
