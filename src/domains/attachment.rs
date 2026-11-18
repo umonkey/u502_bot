@@ -32,6 +32,15 @@ impl AttachmentKind {
             Self::Video => "video",
         }
     }
+
+    /// Reads the value stored in the `kind` column, or `None` when it is unknown.
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "audio" => Some(Self::Audio),
+            "video" => Some(Self::Video),
+            _ => None,
+        }
+    }
 }
 
 /// One attachment to write to the `attachments` table.
@@ -53,22 +62,26 @@ pub struct NewAttachment {
     pub file_size: Option<i64>,
 }
 
-/// One audio attachment waiting to be transcribed.
+/// One attachment waiting to be processed.
 ///
-/// Returned by [`AttachmentRepository::pending_audio`]; it carries only what the transcription worker
-/// needs to fetch the file and report progress.
+/// Returned by [`AttachmentRepository::pending`]; it carries only what the transcription worker
+/// needs to fetch the file, pick a treatment, and report progress.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingAudio {
+pub struct PendingAttachment {
     /// Primary key of the `attachments` row, used to mark it processed.
     pub id: i64,
     /// Telegram chat the message carrying the attachment arrived in.
     pub chat_id: i64,
     /// Telegram message id of the message carrying the attachment.
     pub message_id: i64,
+    /// Media family, which selects the treatment the worker applies.
+    pub kind: AttachmentKind,
     /// Telegram handle used to fetch the file.
     pub file_id: String,
     /// MIME type Telegram reported; absent for a video note.
     pub mime_type: Option<String>,
+    /// Media size in bytes, when Telegram reported one.
+    pub file_size: Option<i64>,
 }
 
 /// What [`AttachmentRepository::store`] did with an attachment.
@@ -148,28 +161,30 @@ impl AttachmentRepository {
         }
     }
 
-    /// Reads up to `limit` audio attachments that are still pending and recent enough.
+    /// Reads up to `limit` attachments of one `kind` that are still pending and recent enough.
     ///
     /// Only rows whose message arrived at or after `received_since` (Unix epoch seconds, UTC) are
-    /// returned, so the worker's retries stay bounded by a window instead of revisiting old audio
-    /// forever. The `INNER JOIN` is deliberate: the ingest loop writes a message before its
-    /// attachment, so an attachment without a message row only happens when the message insert
+    /// returned, so the worker's retries stay bounded by a window instead of revisiting old
+    /// attachments forever. The `INNER JOIN` is deliberate: the ingest loop writes a message before
+    /// its attachment, so an attachment without a message row only happens when the message insert
     /// failed, and such a row cannot be age-bounded.
     ///
     /// Must stay in sync with the `attachments` and `messages` tables in `dev/schema.sql`.
-    pub async fn pending_audio(
+    pub async fn pending(
         &self,
+        kind: AttachmentKind,
         received_since: i64,
         limit: i64,
-    ) -> Result<Vec<PendingAudio>, AttachmentError> {
+    ) -> Result<Vec<PendingAttachment>, AttachmentError> {
         let rows = sqlx::query(
-            "SELECT a.id, a.chat_id, a.message_id, a.file_id, a.mime_type \
+            "SELECT a.id, a.chat_id, a.message_id, a.kind, a.file_id, a.mime_type, a.file_size \
              FROM attachments AS a \
              JOIN messages AS m ON m.chat_id = a.chat_id AND m.message_id = a.message_id \
-             WHERE a.kind = 'audio' AND a.transcribed = 0 AND m.received_at >= ? \
+             WHERE a.kind = ? AND a.transcribed = 0 AND m.received_at >= ? \
              ORDER BY a.id \
              LIMIT ?",
         )
+        .bind(kind.as_str())
         .bind(received_since)
         .bind(limit)
         .fetch_all(&self.pool)
@@ -177,19 +192,25 @@ impl AttachmentRepository {
 
         let pending = rows
             .into_iter()
-            .map(|row| PendingAudio {
-                id: row.get("id"),
-                chat_id: row.get("chat_id"),
-                message_id: row.get("message_id"),
-                file_id: row.get("file_id"),
-                mime_type: row.get("mime_type"),
+            .filter_map(|row| {
+                let kind = AttachmentKind::from_str(&row.get::<String, _>("kind"))?;
+
+                Some(PendingAttachment {
+                    id: row.get("id"),
+                    chat_id: row.get("chat_id"),
+                    message_id: row.get("message_id"),
+                    kind,
+                    file_id: row.get("file_id"),
+                    mime_type: row.get("mime_type"),
+                    file_size: row.get("file_size"),
+                })
             })
             .collect();
 
         Ok(pending)
     }
 
-    /// Marks one attachment processed, so it leaves [`Self::pending_audio`] for good.
+    /// Marks one attachment processed, so it leaves [`Self::pending`] for good.
     ///
     /// `transcribed` means "processed: transcribed or deliberately skipped", not "has a transcript":
     /// a row whose chat is not white-listed is marked here too, because leaving it pending would
@@ -375,20 +396,82 @@ mod tests {
         repository.store(&video).await.expect("video should store");
 
         let pending = repository
-            .pending_audio(RECEIVED_AT, 10)
+            .pending(AttachmentKind::Audio, RECEIVED_AT, 10)
             .await
-            .expect("pending_audio should succeed");
+            .expect("pending should succeed");
 
         assert_eq!(
             pending,
-            vec![PendingAudio {
+            vec![PendingAttachment {
                 id: 1,
                 chat_id: 42,
                 message_id: 7,
+                kind: AttachmentKind::Audio,
                 file_id: "file-1".to_owned(),
                 mime_type: Some("audio/ogg".to_owned()),
+                file_size: Some(2048),
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn pending_video_returns_video_rows_and_skips_audio() {
+        let repository = in_memory_repository().await;
+        store_message(&repository, 7, RECEIVED_AT).await;
+        store_message(&repository, 8, RECEIVED_AT).await;
+        repository
+            .store(&audio_for(7))
+            .await
+            .expect("audio should store");
+        let video = NewAttachment {
+            message_id: 8,
+            kind: AttachmentKind::Video,
+            file_id: "file-2".to_owned(),
+            mime_type: Some("video/mp4".to_owned()),
+            ..new_attachment()
+        };
+        repository.store(&video).await.expect("video should store");
+
+        let pending = repository
+            .pending(AttachmentKind::Video, RECEIVED_AT, 10)
+            .await
+            .expect("pending should succeed");
+
+        assert_eq!(
+            pending,
+            vec![PendingAttachment {
+                id: 2,
+                chat_id: 42,
+                message_id: 8,
+                kind: AttachmentKind::Video,
+                file_id: "file-2".to_owned(),
+                mime_type: Some("video/mp4".to_owned()),
+                file_size: Some(2048),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_marks_the_kind_it_returns() {
+        let repository = in_memory_repository().await;
+        store_message(&repository, 7, RECEIVED_AT).await;
+        repository
+            .store(&audio_for(7))
+            .await
+            .expect("audio should store");
+
+        let pending = repository
+            .pending(AttachmentKind::Audio, RECEIVED_AT, 10)
+            .await
+            .expect("pending should succeed");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].kind, AttachmentKind::Audio);
+
+        let pending = repository
+            .pending(AttachmentKind::Video, RECEIVED_AT, 10)
+            .await
+            .expect("pending should succeed");
+        assert!(pending.is_empty());
     }
 
     #[tokio::test]
@@ -406,9 +489,9 @@ mod tests {
             .expect("mark_transcribed should succeed");
 
         let pending = repository
-            .pending_audio(RECEIVED_AT, 10)
+            .pending(AttachmentKind::Audio, RECEIVED_AT, 10)
             .await
-            .expect("pending_audio should succeed");
+            .expect("pending should succeed");
         assert!(pending.is_empty());
     }
 
@@ -427,9 +510,9 @@ mod tests {
             .expect("recent audio should store");
 
         let pending = repository
-            .pending_audio(RECEIVED_AT + 60, 10)
+            .pending(AttachmentKind::Audio, RECEIVED_AT + 60, 10)
             .await
-            .expect("pending_audio should succeed");
+            .expect("pending should succeed");
 
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].message_id, 8);
@@ -444,9 +527,9 @@ mod tests {
             .expect("audio should store");
 
         let pending = repository
-            .pending_audio(RECEIVED_AT, 10)
+            .pending(AttachmentKind::Audio, RECEIVED_AT, 10)
             .await
-            .expect("pending_audio should succeed");
+            .expect("pending should succeed");
         assert!(pending.is_empty());
     }
 
@@ -470,9 +553,9 @@ mod tests {
             .expect("mark_transcribed should succeed");
 
         let pending = repository
-            .pending_audio(RECEIVED_AT, 10)
+            .pending(AttachmentKind::Audio, RECEIVED_AT, 10)
             .await
-            .expect("pending_audio should succeed");
+            .expect("pending should succeed");
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id, 2);
 

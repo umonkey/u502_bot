@@ -65,6 +65,12 @@ pub const OPENROUTER_OUTPUT_TOKENS: &str = "openrouter.tokens.output";
 /// Application metric recording what a call cost, in micro-USD.
 pub const OPENROUTER_COST_MICRO_USD: &str = "openrouter.cost_micro_usd";
 
+/// Application metric counting every ffmpeg call, successful or not.
+pub const FFMPEG_CALLS: &str = "ffmpeg.calls";
+
+/// Application metric measuring every ffmpeg call, in milliseconds.
+pub const FFMPEG_DURATION: &str = "ffmpeg.duration";
+
 /// Installs logging and optional Sentry reporting.
 ///
 /// The returned guard must be bound for the lifetime of the process; dropping it flushes queued
@@ -172,6 +178,16 @@ pub fn llm_usage(input_tokens: u64, output_tokens: u64, cost_micro_usd: f64) {
     sentry::metrics::distribution(OPENROUTER_COST_MICRO_USD, cost_micro_usd).capture();
 }
 
+/// Records one ffmpeg call, successful or not, and how long it took.
+///
+/// The stopwatch wraps the whole extraction, so a timed-out child process still counts.
+pub fn ffmpeg_call(duration: Duration) {
+    sentry::metrics::counter(FFMPEG_CALLS, 1).capture();
+    sentry::metrics::distribution(FFMPEG_DURATION, duration.as_secs_f64() * 1000.0)
+        .unit(Unit::Millisecond)
+        .capture();
+}
+
 /// Reads the DSN, mapping every failure to a reason to disable reporting.
 fn resolve_dsn() -> Result<sentry::types::Dsn, String> {
     let raw =
@@ -270,5 +286,10 @@ mod tests {
     fn llm_metrics_are_safe_without_client() {
         llm_call(Duration::from_millis(1_234));
         llm_usage(1_200, 42, 123.0);
+    }
+
+    #[test]
+    fn ffmpeg_metrics_are_safe_without_client() {
+        ffmpeg_call(Duration::from_millis(432));
     }
 }

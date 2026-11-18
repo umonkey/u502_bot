@@ -1,9 +1,10 @@
-//! Transcription service: turns pending audio attachments into outbox rows.
+//! Transcription service: turns pending attachments into outbox rows.
 //!
 //! The service runs beside the ingestor, so ingestion never waits on an LLM call. Every scan reads
-//! a small batch of audio attachments that are still pending and whose message is at most an hour
-//! old, downloads each file to a temporary directory, asks OpenRouter for a transcript, queues the
-//! text in the outbox, and marks the attachment processed.
+//! a small batch of pending attachments — audio first, then video — whose message is at most an hour
+//! old. An audio attachment is downloaded as-is and sent to OpenRouter; a video attachment is
+//! downloaded, its audio track is extracted with ffmpeg, and the resulting Ogg joins the audio flow.
+//! Either way the transcript is queued in the outbox and the attachment is marked processed.
 //!
 //! The one-hour window bounds both cost and retries: a file that keeps failing is retried on every
 //! scan until its message ages out, and then left alone. `TRANSCRIBE_CHATS` limits which chats are
@@ -16,9 +17,10 @@ use std::env::VarError;
 use std::fmt;
 use std::time::Duration;
 
-use crate::domains::attachment::{AttachmentRepository, PendingAudio};
+use crate::domains::attachment::{AttachmentKind, AttachmentRepository, PendingAttachment};
 use crate::domains::outbox::{NewOutboxMessage, OutboxError, OutboxRepository};
-use crate::infra::openrouter::OpenRouter;
+use crate::infra::ffmpeg::{Ffmpeg, FfmpegError};
+use crate::infra::openrouter::{AudioFormat, OpenRouter};
 use crate::infra::sentry;
 use crate::infra::telegram_bot::Telegram;
 use crate::services::shutdown::Shutdown;
@@ -39,6 +41,10 @@ const WINDOW_SECONDS: i64 = 3_600;
 /// Attachments read per scan.
 const BATCH: i64 = 10;
 
+/// The Bot API refuses `getFile` above 20 MB, so a larger attachment can never be downloaded; it is
+/// skipped and marked processed instead of failing once per scan for the length of the window.
+const MAX_DOWNLOAD_BYTES: i64 = 20 * 1024 * 1024;
+
 /// Pause after a scan that found nothing, or that could not do any work.
 const IDLE: Duration = Duration::from_secs(5);
 
@@ -49,7 +55,7 @@ const IDLE: Duration = Duration::from_secs(5);
 /// split a tag.
 const CHUNK_LIMIT: usize = 4_000;
 
-/// The chats whose audio is transcribed.
+/// The chats whose audio and video are transcribed.
 ///
 /// Membership is a configuration decision, not data, so the check happens after the scan: a chat
 /// that is not listed is logged once and marked processed. An empty whitelist is allowed and
@@ -107,7 +113,7 @@ impl Whitelist {
         self.0.contains(&chat_id)
     }
 
-    /// Returns whether no chat is white-listed, in which case every audio attachment is skipped.
+    /// Returns whether no chat is white-listed, in which case every attachment is skipped.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -136,10 +142,11 @@ impl fmt::Display for WhitelistError {
 
 impl std::error::Error for WhitelistError {}
 
-/// Transcribes pending audio attachments and queues the transcripts for delivery.
+/// Transcribes pending audio and video attachments and queues the transcripts for delivery.
 pub struct Transcriber {
     telegram: Telegram,
     openrouter: OpenRouter,
+    ffmpeg: Ffmpeg,
     attachments: AttachmentRepository,
     outbox: OutboxRepository,
     chats: Whitelist,
@@ -150,6 +157,7 @@ impl Transcriber {
     pub fn new(
         telegram: Telegram,
         openrouter: OpenRouter,
+        ffmpeg: Ffmpeg,
         attachments: AttachmentRepository,
         outbox: OutboxRepository,
         chats: Whitelist,
@@ -157,14 +165,15 @@ impl Transcriber {
         Self {
             telegram,
             openrouter,
+            ffmpeg,
             attachments,
             outbox,
             chats,
         }
     }
 
-    /// Transcribes pending audio until shutdown is requested, pausing only when there is nothing to
-    /// do.
+    /// Transcribes pending attachments until shutdown is requested, pausing only when there is
+    /// nothing to do.
     pub async fn run(self, mut shutdown: Shutdown) {
         while !shutdown.is_requested() {
             if !self.tick(&mut shutdown).await && !shutdown.sleep(IDLE).await {
@@ -175,23 +184,46 @@ impl Transcriber {
         tracing::info!("Stopped the transcriber");
     }
 
-    /// Processes one batch and returns whether any attachment was finished.
+    /// Processes one batch of each kind and returns whether any attachment was finished.
+    ///
+    /// Audio is scanned before video so a known-good path runs first; because the two scans are
+    /// separate batches, a permanently failing audio backlog cannot starve video.
     ///
     /// The pause lives in the caller, where it is interruptible: a failed scan and a batch in which
     /// every row failed both return `false`, so a file that keeps failing or a pool that rejects a
     /// read is retried once per [`IDLE`] instead of as fast as the failure returns.
     async fn tick(&self, shutdown: &mut Shutdown) -> bool {
         let now = unix_now();
+        let mut processed = false;
+
+        for kind in [AttachmentKind::Audio, AttachmentKind::Video] {
+            if shutdown.is_requested() {
+                break;
+            }
+
+            processed |= self.scan(kind, now, shutdown).await;
+        }
+
+        processed
+    }
+
+    /// Scans one kind and processes its batch; returns whether any attachment was finished.
+    async fn scan(&self, kind: AttachmentKind, now: i64, shutdown: &mut Shutdown) -> bool {
         let pending = match self
             .attachments
-            .pending_audio(now - WINDOW_SECONDS, BATCH)
+            .pending(kind, now - WINDOW_SECONDS, BATCH)
             .await
         {
             Ok(pending) => pending,
             Err(error) => {
+                let message = match kind {
+                    AttachmentKind::Audio => "Failed to scan for pending audio",
+                    AttachmentKind::Video => "Failed to scan for pending video",
+                };
                 tracing::error!(
                     error = &error as &dyn std::error::Error,
-                    "Failed to scan for pending audio"
+                    kind = kind.as_str(),
+                    "{message}"
                 );
 
                 return false;
@@ -215,23 +247,61 @@ impl Transcriber {
     ///
     /// No database transaction spans the download or the LLM call: each statement returns the pooled
     /// connection immediately, so holding one would stall the ingestor for the length of the call.
-    /// A shutdown interrupts either call by dropping it; the attachment stays pending and is retried
-    /// on the next start, while the writes that follow are never cancelled.
-    async fn process(&self, attachment: PendingAudio, now: i64, shutdown: &mut Shutdown) -> bool {
+    /// A shutdown interrupts any of those calls by dropping it; the attachment stays pending and is
+    /// retried on the next start, while the writes that follow are never cancelled.
+    async fn process(
+        &self,
+        attachment: PendingAttachment,
+        now: i64,
+        shutdown: &mut Shutdown,
+    ) -> bool {
         if !self.chats.contains(attachment.chat_id) {
             tracing::warn!(
                 chat_id = attachment.chat_id,
-                "Voice message from chat {} skipped: not a white listed chat, add to TRANSCRIBE_CHATS if needed.",
+                kind = attachment.kind.as_str(),
+                "Attachment from chat {} skipped: not a white listed chat, add to TRANSCRIBE_CHATS if needed.",
                 attachment.chat_id
             );
 
             return self.mark_processed(&attachment).await;
         }
 
+        if let Some(file_size) = attachment.file_size
+            && file_size > MAX_DOWNLOAD_BYTES
+        {
+            tracing::warn!(
+                attachment_id = attachment.id,
+                chat_id = attachment.chat_id,
+                message_id = attachment.message_id,
+                kind = attachment.kind.as_str(),
+                file_size,
+                max_download_bytes = MAX_DOWNLOAD_BYTES,
+                "Skipped an attachment: {file_size} bytes is above the Bot API limit of {MAX_DOWNLOAD_BYTES} bytes"
+            );
+
+            return self.mark_processed(&attachment).await;
+        }
+
+        match attachment.kind {
+            AttachmentKind::Audio => self.process_audio(&attachment, now, shutdown).await,
+            AttachmentKind::Video => self.process_video(&attachment, now, shutdown).await,
+        }
+    }
+
+    /// Transcribes the bytes Telegram stored for an audio attachment.
+    ///
+    /// The downloaded file is sent untouched, so the declared [`AudioFormat`] is whatever MIME type
+    /// Telegram reported; only the video branch extracts and re-encodes.
+    async fn process_audio(
+        &self,
+        attachment: &PendingAttachment,
+        now: i64,
+        shutdown: &mut Shutdown,
+    ) -> bool {
         let directory = match tempfile::tempdir() {
             Ok(directory) => directory,
             Err(error) => {
-                log_failure(&attachment, &error);
+                log_failure(attachment, &error);
 
                 return false;
             }
@@ -243,23 +313,111 @@ impl Transcriber {
             () = shutdown.wait() => return false,
         };
         if let Err(error) = downloaded {
-            log_failure(&attachment, &error);
+            log_failure(attachment, &error);
 
             return false;
         }
 
         let transcribed = tokio::select! {
-            result = self.openrouter.transcribe_audio(&path, TRANSCRIPTION_PROMPT) => result,
+            result = self.openrouter.transcribe_audio(
+                &path,
+                TRANSCRIPTION_PROMPT,
+                AudioFormat::from_mime_type(attachment.mime_type.as_deref()),
+            ) => result,
             () = shutdown.wait() => return false,
         };
         let transcript = match transcribed {
             Ok(transcript) => transcript,
             Err(error) => {
-                log_failure(&attachment, &error);
+                log_failure(attachment, &error);
 
                 return false;
             }
         };
+
+        self.finish(attachment, &transcript, now).await
+    }
+
+    /// Transcribes a video attachment by extracting its audio track first.
+    ///
+    /// The extracted stream is fixed at Ogg/Opus 16 kHz mono, so the request declares
+    /// [`AudioFormat::Ogg`] unconditionally. A video with no audio track or a host without ffmpeg is
+    /// skipped and marked processed: retrying it could not change the outcome, and the window would
+    /// keep paying for it.
+    async fn process_video(
+        &self,
+        attachment: &PendingAttachment,
+        now: i64,
+        shutdown: &mut Shutdown,
+    ) -> bool {
+        let directory = match tempfile::tempdir() {
+            Ok(directory) => directory,
+            Err(error) => {
+                log_failure(attachment, &error);
+
+                return false;
+            }
+        };
+        let video = directory.path().join("video");
+
+        let downloaded = tokio::select! {
+            result = self.telegram.download(&attachment.file_id, &video) => result,
+            () = shutdown.wait() => return false,
+        };
+        if let Err(error) = downloaded {
+            log_failure(attachment, &error);
+
+            return false;
+        }
+
+        let audio = directory.path().join("audio.ogg");
+        let extracted = tokio::select! {
+            result = self.ffmpeg.extract_audio(&video, &audio) => result,
+            () = shutdown.wait() => return false,
+        };
+        if let Err(error) = extracted {
+            match &error {
+                FfmpegError::Unavailable(_) | FfmpegError::NoAudioStream { .. } => {
+                    tracing::warn!(
+                        attachment_id = attachment.id,
+                        chat_id = attachment.chat_id,
+                        message_id = attachment.message_id,
+                        error = &error as &dyn std::error::Error,
+                        "Skipped a video attachment: ffmpeg cannot extract its audio track"
+                    );
+
+                    return self.mark_processed(attachment).await;
+                }
+                _ => {
+                    log_failure(attachment, &error);
+
+                    return false;
+                }
+            }
+        }
+
+        let transcribed = tokio::select! {
+            result = self.openrouter.transcribe_audio(
+                &audio,
+                TRANSCRIPTION_PROMPT,
+                AudioFormat::Ogg,
+            ) => result,
+            () = shutdown.wait() => return false,
+        };
+        let transcript = match transcribed {
+            Ok(transcript) => transcript,
+            Err(error) => {
+                log_failure(attachment, &error);
+
+                return false;
+            }
+        };
+
+        self.finish(attachment, &transcript, now).await
+    }
+
+    /// Queues a transcript and marks the attachment processed; returns whether both happened.
+    async fn finish(&self, attachment: &PendingAttachment, transcript: &str, now: i64) -> bool {
         let transcript = transcript.trim();
 
         if transcript.is_empty() {
@@ -267,27 +425,28 @@ impl Transcriber {
                 attachment_id = attachment.id,
                 chat_id = attachment.chat_id,
                 message_id = attachment.message_id,
-                "Transcribed an audio attachment with no speech"
+                kind = attachment.kind.as_str(),
+                "Transcribed an attachment with no speech"
             );
 
-            return self.mark_processed(&attachment).await;
+            return self.mark_processed(attachment).await;
         }
 
-        if let Err(error) = self.enqueue(&attachment, transcript, now).await {
-            log_failure(&attachment, &error);
+        if let Err(error) = self.enqueue(attachment, transcript, now).await {
+            log_failure(attachment, &error);
 
             return false;
         }
 
-        self.mark_processed(&attachment).await
+        self.mark_processed(attachment).await
     }
 
     /// Queues the transcript in chunks Telegram will accept; returns whether every row was written.
     ///
-    /// Only the first chunk answers the voice message, so the reply thread stays on it.
+    /// Only the first chunk answers the source message, so the reply thread stays on it.
     async fn enqueue(
         &self,
-        attachment: &PendingAudio,
+        attachment: &PendingAttachment,
         transcript: &str,
         now: i64,
     ) -> Result<(), OutboxError> {
@@ -307,7 +466,7 @@ impl Transcriber {
     }
 
     /// Marks one attachment processed and counts it, on every path that finishes with it.
-    async fn mark_processed(&self, attachment: &PendingAudio) -> bool {
+    async fn mark_processed(&self, attachment: &PendingAttachment) -> bool {
         match self.attachments.mark_transcribed(attachment.id).await {
             Ok(()) => {
                 sentry::attachment_transcribed();
@@ -317,8 +476,9 @@ impl Transcriber {
             Err(error) => {
                 tracing::error!(
                     attachment_id = attachment.id,
+                    kind = attachment.kind.as_str(),
                     error = &error as &dyn std::error::Error,
-                    "Failed to mark an audio attachment processed"
+                    "Failed to mark an attachment processed"
                 );
 
                 false
@@ -328,13 +488,14 @@ impl Transcriber {
 }
 
 /// Logs one attachment that could not be processed; it stays pending, so the next scan retries it.
-fn log_failure(attachment: &PendingAudio, error: &(dyn std::error::Error + 'static)) {
+fn log_failure(attachment: &PendingAttachment, error: &(dyn std::error::Error + 'static)) {
     tracing::error!(
         attachment_id = attachment.id,
         chat_id = attachment.chat_id,
         message_id = attachment.message_id,
+        kind = attachment.kind.as_str(),
         error = error,
-        "Failed to process an audio attachment"
+        "Failed to process an attachment"
     );
 }
 
@@ -390,6 +551,11 @@ fn chunks(text: &str, limit: usize) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_download_cap_is_the_bot_api_limit() {
+        assert_eq!(MAX_DOWNLOAD_BYTES, 20 * 1024 * 1024);
+    }
 
     #[test]
     fn whitelist_parses_trimmed_and_spaced_ids() {

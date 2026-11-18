@@ -15,7 +15,7 @@ RUN touch src/main.rs \
 
 FROM debian:trixie-slim AS runtime
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates supervisor cron sqlite3 \
+ && apt-get install -y --no-install-recommends ca-certificates supervisor cron sqlite3 ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 RUN useradd --system --create-home --home-dir /home/u502 --shell /usr/sbin/nologin u502 \
  && mkdir -p /var/log/supervisor \

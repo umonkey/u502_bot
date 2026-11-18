@@ -8,6 +8,7 @@ use std::process::ExitCode;
 use crate::domains::attachment::AttachmentRepository;
 use crate::domains::message::MessageRepository;
 use crate::domains::outbox::OutboxRepository;
+use crate::infra::ffmpeg::Ffmpeg;
 use crate::infra::openrouter::{self, OpenRouter};
 use crate::infra::telegram_bot::Telegram;
 use crate::infra::{config::get_secret, database, sentry, signal};
@@ -49,11 +50,19 @@ async fn start() -> Result<(), ExitCode> {
     let chats = resolve(Whitelist::from_env(), "Failed to load TRANSCRIBE_CHATS")?;
     if chats.is_empty() {
         tracing::warn!(
-            "TRANSCRIBE_CHATS is empty: no chat is transcribed. Audio is skipped and each skip logs its chat id, so add the ids you want transcribed to TRANSCRIBE_CHATS."
+            "TRANSCRIBE_CHATS is empty: no chat is transcribed. Audio and video are skipped and each skip logs its chat id, so add the ids you want transcribed to TRANSCRIBE_CHATS."
         );
     }
 
     tracing::info!(model = %model, "Using model {model} to transcribe; override with TRANSCRIBE_MODEL_NAME");
+
+    let ffmpeg = Ffmpeg::from_env();
+    if let Err(error) = ffmpeg.probe().await {
+        tracing::warn!(
+            error = &error as &dyn std::error::Error,
+            "ffmpeg is not available: video transcription will be skipped; install ffmpeg or set FFMPEG_PATH"
+        );
+    }
 
     let openrouter = resolve(
         OpenRouter::new(openrouter_key, model),
@@ -73,6 +82,7 @@ async fn start() -> Result<(), ExitCode> {
     let transcriber = Transcriber::new(
         telegram.clone(),
         openrouter,
+        ffmpeg,
         AttachmentRepository::new(pool.clone()),
         OutboxRepository::new(pool.clone()),
         chats,

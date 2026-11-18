@@ -2,8 +2,12 @@
 //!
 //! [`OpenRouter::transcribe_audio`] sends one audio file to OpenRouter's Chat Completions endpoint
 //! and returns the transcript. Chat Completions is used rather than the Responses API because its
-//! `input_audio.format` accepts any provider-supported container name, including the `ogg` that a
-//! Telegram voice note carries, so no transcode step and no `ffmpeg` in the image is needed.
+//! `input_audio.format` accepts any provider-supported container name, so a Telegram voice note's
+//! `ogg` needs no transcode step.
+//!
+//! The caller declares the [`AudioFormat`] because the caller is what knows the bytes: the audio
+//! branch sends the downloaded file untouched and maps its MIME type, while the video branch
+//! extracts the audio track to Ogg and passes [`AudioFormat::Ogg`] unconditionally.
 //!
 //! The client records its own telemetry: the call counter and duration are captured for failed
 //! calls too, and only this module knows that a call happened. Failures are returned to the caller,
@@ -54,6 +58,61 @@ fn resolve_model(raw: Option<String>) -> String {
     match raw {
         Some(model) if !model.trim().is_empty() => model,
         _ => DEFAULT_TRANSCRIBE_MODEL.to_owned(),
+    }
+}
+
+/// The container name sent as `input_audio.format`.
+///
+/// The model receives exactly the bytes of the file, so the format has to match what the caller
+/// wrote: the audio branch maps it from the Telegram MIME type, and the video branch always uses
+/// [`Self::Ogg`] because that is what the extractor produces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioFormat {
+    /// `audio/ogg`, what a Telegram voice note carries and what the video branch extracts.
+    Ogg,
+    /// `audio/mpeg` or `audio/mp3`.
+    Mp3,
+    /// `audio/wav` or `audio/x-wav`.
+    Wav,
+    /// `audio/mp4`, `audio/m4a`, or `audio/x-m4a`.
+    M4a,
+    /// `audio/flac` or `audio/x-flac`.
+    Flac,
+    /// `audio/aac`.
+    Aac,
+    /// `audio/webm`.
+    Webm,
+}
+
+impl AudioFormat {
+    /// The container name OpenRouter expects.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ogg => "ogg",
+            Self::Mp3 => "mp3",
+            Self::Wav => "wav",
+            Self::M4a => "m4a",
+            Self::Flac => "flac",
+            Self::Aac => "aac",
+            Self::Webm => "webm",
+        }
+    }
+
+    /// Maps a Telegram MIME type to the container name the model will receive.
+    ///
+    /// Anything unknown falls back to [`Self::Ogg`]: a Telegram voice note is Ogg/Opus, which is the
+    /// dominant case for this bot.
+    pub fn from_mime_type(mime_type: Option<&str>) -> Self {
+        match mime_type {
+            Some("audio/ogg") => Self::Ogg,
+            Some("audio/mpeg" | "audio/mp3") => Self::Mp3,
+            Some("audio/wav" | "audio/x-wav") => Self::Wav,
+            Some("audio/mp4" | "audio/m4a" | "audio/x-m4a") => Self::M4a,
+            Some("audio/flac" | "audio/x-flac") => Self::Flac,
+            Some("audio/aac") => Self::Aac,
+            Some("audio/webm") => Self::Webm,
+            _ => Self::Ogg,
+        }
     }
 }
 
@@ -164,15 +223,17 @@ impl OpenRouter {
     ///
     /// The file is read whole and base64-encoded, because that is what `input_audio` carries. One
     /// request, one choice, no tools, bounded output, and reasoning disabled keep it a single turn.
+    /// `format` describes the bytes the caller wrote; nothing here transcodes.
     /// The call counter and duration are recorded on every path; usage is recorded only when
     /// OpenRouter reports it. Failures are returned so the caller can log them with context.
     pub async fn transcribe_audio(
         &self,
         path: &Path,
         prompt: &str,
+        format: AudioFormat,
     ) -> Result<String, OpenRouterError> {
         let started = Instant::now();
-        let result = self.request(path, prompt).await;
+        let result = self.request(path, prompt, format).await;
         let elapsed = started.elapsed();
         sentry::llm_call(elapsed);
 
@@ -202,6 +263,7 @@ impl OpenRouter {
         &self,
         path: &Path,
         prompt: &str,
+        format: AudioFormat,
     ) -> Result<(String, Option<Usage>), OpenRouterError> {
         let audio = tokio::fs::read(path)
             .await
@@ -220,8 +282,8 @@ impl OpenRouter {
                     Content::Audio {
                         input_audio: InputAudio {
                             data: &data,
-                            // A Telegram voice note is Ogg/Opus and carries no MIME type here.
-                            format: audio_format(None),
+                            // The caller downloaded or extracted these bytes, so it knows the format.
+                            format: format.as_str(),
                         },
                     },
                 ],
@@ -344,23 +406,6 @@ fn parse_response(body: &str) -> Result<(String, Option<Usage>), OpenRouterError
     Ok((text.to_owned(), response.usage))
 }
 
-/// Maps a Telegram MIME type to the container name OpenRouter expects.
-///
-/// Anything unknown falls back to `ogg`: a Telegram voice note is Ogg/Opus, which is the dominant
-/// case for this bot.
-fn audio_format(mime_type: Option<&str>) -> &'static str {
-    match mime_type {
-        Some("audio/ogg") => "ogg",
-        Some("audio/mpeg" | "audio/mp3") => "mp3",
-        Some("audio/wav" | "audio/x-wav") => "wav",
-        Some("audio/mp4" | "audio/m4a" | "audio/x-m4a") => "m4a",
-        Some("audio/flac" | "audio/x-flac") => "flac",
-        Some("audio/aac") => "aac",
-        Some("audio/webm") => "webm",
-        _ => "ogg",
-    }
-}
-
 /// Keeps at most [`MAX_ERROR_BODY`] characters of an error body, on a character boundary.
 fn truncate(body: &str) -> String {
     match body.char_indices().nth(MAX_ERROR_BODY) {
@@ -424,24 +469,45 @@ mod tests {
     #[test]
     fn audio_formats_are_mapped_from_mime_types() {
         let cases = [
-            (Some("audio/ogg"), "ogg"),
-            (Some("audio/mpeg"), "mp3"),
-            (Some("audio/mp3"), "mp3"),
-            (Some("audio/wav"), "wav"),
-            (Some("audio/x-wav"), "wav"),
-            (Some("audio/mp4"), "m4a"),
-            (Some("audio/m4a"), "m4a"),
-            (Some("audio/x-m4a"), "m4a"),
-            (Some("audio/flac"), "flac"),
-            (Some("audio/x-flac"), "flac"),
-            (Some("audio/aac"), "aac"),
-            (Some("audio/webm"), "webm"),
-            (None, "ogg"),
-            (Some("application/octet-stream"), "ogg"),
+            (Some("audio/ogg"), AudioFormat::Ogg),
+            (Some("audio/mpeg"), AudioFormat::Mp3),
+            (Some("audio/mp3"), AudioFormat::Mp3),
+            (Some("audio/wav"), AudioFormat::Wav),
+            (Some("audio/x-wav"), AudioFormat::Wav),
+            (Some("audio/mp4"), AudioFormat::M4a),
+            (Some("audio/m4a"), AudioFormat::M4a),
+            (Some("audio/x-m4a"), AudioFormat::M4a),
+            (Some("audio/flac"), AudioFormat::Flac),
+            (Some("audio/x-flac"), AudioFormat::Flac),
+            (Some("audio/aac"), AudioFormat::Aac),
+            (Some("audio/webm"), AudioFormat::Webm),
+            (None, AudioFormat::Ogg),
+            (Some("application/octet-stream"), AudioFormat::Ogg),
         ];
 
         for (mime_type, expected) in cases {
-            assert_eq!(audio_format(mime_type), expected, "mime type {mime_type:?}");
+            assert_eq!(
+                AudioFormat::from_mime_type(mime_type),
+                expected,
+                "mime type {mime_type:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn audio_formats_render_the_container_name() {
+        let cases = [
+            (AudioFormat::Ogg, "ogg"),
+            (AudioFormat::Mp3, "mp3"),
+            (AudioFormat::Wav, "wav"),
+            (AudioFormat::M4a, "m4a"),
+            (AudioFormat::Flac, "flac"),
+            (AudioFormat::Aac, "aac"),
+            (AudioFormat::Webm, "webm"),
+        ];
+
+        for (format, expected) in cases {
+            assert_eq!(format.as_str(), expected, "format {format:?}");
         }
     }
 
@@ -511,7 +577,7 @@ mod tests {
         let path = std::env::temp_dir().join("u502-openrouter-missing-audio");
 
         let error = client
-            .transcribe_audio(&path, "Transcribe.")
+            .transcribe_audio(&path, "Transcribe.", AudioFormat::Ogg)
             .await
             .expect_err("missing file should not transcribe");
         match error {
