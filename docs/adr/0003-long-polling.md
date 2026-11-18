@@ -1,6 +1,7 @@
 # ADR 0003: Receive updates by long polling
 
 - Status: accepted
+- Amended: 2026-11-18, so the redelivery consequence matches the deduplicating store.
 - Date: 2026-11-17
 
 ## Context
@@ -22,8 +23,9 @@ traffic, and owns no certificates.
 - rollback is a restart, because there is no registration to undo
 - updates arrive with more latency than a pushed update, and one long-lived outbound connection is
   held for the life of the process
-- the update offset lives in memory, so a restart can deliver the last batch again; duplicate logs
-  are accepted
+- the update offset lives in memory, so a restart can deliver the last batch again; the store
+  recognises the duplicate by `(chat_id, message_id)`, skips the second copy, and logs it once
+  (ADR 0005)
 - transient failures are retried internally, so a long outage produces repeated errors rather than a
   restart
 

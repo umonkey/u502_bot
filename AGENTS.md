@@ -51,9 +51,9 @@ Running `make` without a target executes `check`.
 - `src/infra/sentry.rs`: `VariableName::SentryDsn`, `init` (the `tracing` subscriber, the optional Sentry client, an error layer, and a crate-scoped structured-log layer), and the metric functions for messages, attachments, the outbox, OpenRouter, and ffmpeg.
 - `src/infra/signal.rs`: `Signal` and `wait`; the listener for `SIGINT` and, on Unix, `SIGTERM`.
 - `src/infra/telegram_bot.rs`: `Telegram` and `Messages`, the Telegram client; it receives, downloads, reacts, and sends, and knows nothing about storage.
-- `src/services.rs`: declares the long-running services, the shutdown flag they share, and their shared clock.
+- `src/services.rs`: declares the long-running services, the shutdown flag they share, and the shared time helpers.
 - `src/services/shutdown.rs`: `Shutdown`, the sticky cooperative flag that stops every service on one request.
-- `src/services/wake.rs`: `Wake`, the one-way pulse a service sends another when it creates work, which ends the receiver's idle pause early.
+- `src/services/wake.rs`: `Wake`, the pulse a service sends another when it creates work, which ends the receiver's idle pause early.
 - `src/services/ingestor.rs`: the message loop; it stores every delivered message and its attachment metadata, drains what the dispatcher already queued, then stops polling.
 - `src/services/transcriber.rs`: the transcription loop for audio and video and the `TRANSCRIBE_CHATS` whitelist; it processes an audio batch, then a video batch, and a video is downloaded and reduced with `ffmpeg` before it joins the audio flow.
 - `src/services/outbox.rs`: the delivery loop; it sends queued replies and marks them sent.
@@ -78,6 +78,17 @@ Add every new subcommand as a variant of the `Command` enum in `src/cli/mod.rs`,
 - Clippy must pass with `-D warnings`; `make lint` enforces this.
 - Run `cargo fmt` (or `make format`) before committing.
 - Avoid `unwrap()` in runtime paths; return or handle errors explicitly.
+
+## Comments
+
+- Explain why, not what. A comment that restates a name, a type, or the next line is noise; delete it.
+- Keep a comment only for a decision, a trade-off, an invariant the type system does not enforce, or
+  a reference to an ADR. Everything else is a candidate for deletion.
+- A module header names the module's responsibility and what cannot be inferred from its API; it
+  never repeats `AGENTS.md` or an ADR.
+- Do not narrate history, do not keep commented-out code, and do not explain a bug that is fixed.
+- Prefer a name, a type, or a test over prose. Fix a stale comment in the change that makes it stale.
+- No doc comment on an obvious `new`, getter, `Display`, `From`, or self-describing field.
 
 ## Docker
 

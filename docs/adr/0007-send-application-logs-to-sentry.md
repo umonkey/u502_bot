@@ -1,6 +1,7 @@
 # ADR 0007: Send application logs to Sentry
 
 - Status: accepted
+- Amended: 2026-11-18, to enumerate what actually leaves the host.
 - Date: 2026-11-17
 
 ## Context
@@ -13,17 +14,20 @@ actually did, and that is the content that was excluded.
 ## Decision
 
 Forward the application's structured logs at informational severity and above, including message
-text and the identifiers of the chats and users involved.
+text and captions, transcripts, sender ids and names, chat ids, file ids, MIME types, and file names.
 
 Keep console verbosity independently configurable, so local detail never widens what is transmitted.
 Keep the integration optional, and keep automatic person-identifying enrichment and metric attributes
 off, so only what the code logs explicitly leaves the host.
 
+Forward only events whose target starts with this crate's name; dependency events become issues
+through the error layer but are not forwarded as logs.
+
 ## Consequences
 
 - an operator can read activity in monitoring instead of opening a shell on the host
-- message text, identifiers, and media metadata are stored by a third party for its retention period
-  and are visible to everyone with access to the project
+- message text, transcripts, identifiers, and media metadata are stored by a third party for its
+  retention period and are visible to everyone with access to the project
 - log volume grows with traffic and consumes a quota separate from errors
 - a failure appears twice, once as a log and once as an issue
 - the old guarantee that content stays on the host is now only a policy: every new log line is a

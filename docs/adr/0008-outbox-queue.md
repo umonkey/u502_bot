@@ -1,6 +1,7 @@
 # ADR 0008: Queue outgoing replies in an outbox
 
 - Status: accepted
+- Amended: 2026-11-18, to record rendering, batching, the source-time join, and producer duplication.
 - Date: 2026-11-17
 
 ## Context
@@ -13,11 +14,16 @@ is replaced. The reply must also answer the original message.
 ## Decision
 
 Record every outgoing reply durably before it is sent, and deliver those records from a separate,
-long-running sender. A record holds the destination, the text, the time it was queued, and the
-message it answers; the time it was delivered is the only marker of success.
+long-running sender. A record holds the destination, the text as escaped Telegram HTML rendered by
+the producer, the time it was queued, and the message it answers; the time it was delivered is the
+only marker of success.
 
 Send in insertion order, in small batches, pausing between sends so a burst does not trip the
 platform's rate limit. Leave a record unsent when delivery fails, so the next pass retries it.
+
+Read rows in id order in batches of ten, pause two seconds between sends as the rate-limit bound, and
+pause five seconds when the queue is empty. The source message's Telegram time is read through a left
+join on `messages`, not stored, so the latency metric needs no schema change.
 
 ## Consequences
 
@@ -27,7 +33,9 @@ platform's rate limit. Leave a record unsent when delivery fails, so the next pa
 - delivery is at-least-once: an interruption between a successful send and the marker that follows
   re-sends that one message
 - a record the platform rejects forever is retried on every pass, because nothing counts attempts
-- delivered records are kept, so the queue only grows
+- the table has no producer-side dedupe key, so a producer that fails after writing part of a
+  transcript can queue the same rows again on retry
+- delivered rows are never pruned, so the queue only grows
 
 ## Alternatives considered
 

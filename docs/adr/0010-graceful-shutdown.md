@@ -1,6 +1,7 @@
 # ADR 0010: Stop the bot gracefully
 
 - Status: accepted
+- Amended: 2026-11-18, to record service isolation and the concrete stop bounds.
 - Date: 2026-11-18
 
 ## Context
@@ -16,8 +17,9 @@ Treat a stop as one cooperative request. The interactive interrupt and the platf
 signal ask the same, and the request is sticky, so a signal that arrives before the services are
 ready is honoured when they start. Services stop at a work boundary: they begin nothing new, abandon
 idle pauses and calls to other systems, and never interrupt a write already begun. Receiving stores
-what the platform had already handed over and only then stops polling. When every service has ended,
-the local store is closed and monitoring is flushed, last of all. A graceful stop reports success.
+what the platform had already handed over and only then stops polling. The dispatcher is stopped
+after the drain, waiting at most five seconds for its task. When every service has ended, the pool is
+closed and then the monitoring guard is dropped, last of all. A graceful stop reports success.
 
 ## Consequences
 
@@ -26,7 +28,10 @@ the local store is closed and monitoring is flushed, last of all. A graceful sto
 - an abandoned call to another system is repeated on the next start, so a transcription already paid
   for can be paid for twice, and an interrupted delivery may be repeated, which at-least-once
   delivery already accepts
-- the supervisor's grace period stays the hard bound, and a second signal does not force an exit
+- the supervisor's grace period is the hard bound (15 seconds inside Compose's 20-second stop), and a
+  second signal does not force an exit
+- a service that returns or panics is logged, and the other services keep running, so a stopped stage
+  leaves the bot up but that stage absent
 
 ## Alternatives considered
 

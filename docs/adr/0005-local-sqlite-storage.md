@@ -1,6 +1,7 @@
 # ADR 0005: Keep received messages in a local database
 
 - Status: accepted
+- Amended: 2026-11-18, to record the pool settings and the additive-only schema rule.
 - Date: 2026-11-17
 
 ## Context
@@ -19,15 +20,19 @@ Separate receiving from storing: the platform connection only delivers messages,
 starts the bot stores them, so the platform client knows nothing about storage. Access the store
 asynchronously, so a slow disk delays the next message instead of stalling the connection. Apply the
 stored structure at startup, so a fresh volume needs no preparation and an existing one keeps
-working. Recognise a message delivered again and leave the stored copy alone. There is no migration
-mechanism yet; a change to the structure ships with the application.
+working. Open the file with WAL journaling, a five-second busy timeout, and foreign keys, over a pool
+of one connection; embed the schema in the binary at build time. Recognise a message delivered again
+and leave the stored copy alone. There is no migration mechanism yet: startup only creates missing
+objects, so an additive statement ships with the application, while altering an existing table needs
+a manual upgrade.
 
 ## Consequences
 
 - receiving and later processing are decoupled, so slow or failing work never holds up messages
 - messages survive restarts, and a redelivery is harmless
 - a backup is a copy of one file, and there is no service to install, watch, or pay for
-- old messages are never removed, so the file grows
+- old messages are never removed, so the file grows, and delivered outbox rows and processed
+  attachments are kept too
 - an edited message is not updated, and the first version is what remains stored
 - a stored structure change needs a rebuild and a manual upgrade of existing files
 - the arrangement fits one bot on one host, because a second instance would write the same file

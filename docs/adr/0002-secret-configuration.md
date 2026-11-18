@@ -2,7 +2,7 @@
 
 - Status: accepted
 - Date: 2026-11-17
-- Amended: 2026-11-18, so the direct-or-file rule covers every configuration variable, not only secrets; the ffmpeg binary was dropped from the configuration surface because the program is now resolved through `PATH`
+- Amended: 2026-11-18, so the direct-or-file rule covers every configuration variable, not only secrets; the ffmpeg binary was dropped from the configuration surface because the program is now resolved through `PATH`, and an unresolvable optional model id falls back to its default
 
 ## Context
 
@@ -10,10 +10,10 @@ The bot needs a bot token at runtime, and the token must never be committed, bak
 logged. Two deployment styles must work: a local run, where exporting a variable is convenient, and a
 container, where the platform injects configuration either as a value or as a mounted file.
 
-The same need applies to the rest of the configuration: the database path, the chat whitelist, the
-model id, and the ffmpeg binary. Giving only the secrets a file form forced a per-variable rule onto
-each of the others; four different blank checks accumulated, and the documentation had to explain why
-one variable resolved differently from another.
+The same need applies to the rest of the configuration: the database path, the chat whitelist, and the
+model id. Giving only the secrets a file form forced a per-variable rule onto each of the others; four
+different blank checks accumulated, and the documentation had to explain why one variable resolved
+differently from another.
 
 ## Decision
 
@@ -29,6 +29,9 @@ errors that name the variable or the path, never a panic and never an empty valu
 missing required value exits non-zero and the supervisor restarts the process. No secret value is
 logged.
 
+`require_secret` is the required-value resolver; it also guards `DATABASE_PATH`, which is not a
+secret.
+
 `RUST_LOG` is the exception: `tracing_subscriber`'s `EnvFilter` reads it, not this crate, so it has no
 file form.
 
@@ -37,6 +40,8 @@ file form.
 - one resolver, one trim, one interpretation of blank, and one error type serve every variable; the
   same binary works with exported values and mounted files, with no extra tooling
 - a secret never reaches the logs, and a missing required value fails loudly at startup
+- an optional value that cannot be resolved falls back only where the caller supplies a default: the
+  transcription model logs one warning and uses the compiled-in default
 - any variable can be mounted; a leftover `<NAME>_FILE` in a shared environment overrides the direct
   value for every variable, not only the secrets
 - paths with meaningful surrounding whitespace are no longer representable, so an operator has to

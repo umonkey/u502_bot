@@ -1,7 +1,9 @@
 # ADR 0004: Report errors and metrics to Sentry
 
 - Status: accepted
+- Amended: 2026-11-18, to record distributions and the relationship to ADR 0007.
 - Date: 2026-11-17
+- Related: ADR 0007 supersedes the Context's no-chat-content restriction and adds structured logs; this ADR owns issues and metrics.
 
 ## Context
 
@@ -12,8 +14,9 @@ must not depend on a system TLS library, and must not send chat content.
 
 ## Decision
 
-Send errors, panics, and a small number of counters to a hosted monitoring service, configured
-optionally: a missing or invalid destination logs one warning and the bot runs normally.
+Send errors, panics, counters, and distributions for duration, tokens, cost, and latency to a hosted
+monitoring service, configured optionally: a missing or invalid destination logs one warning and the
+bot runs normally.
 
 Report every error-level event and every panic without per-call-site work, and keep automatic
 person-identifying enrichment and metric attributes off, so only what the code logs explicitly leaves
@@ -22,7 +25,8 @@ exit through the normal return path so queued events flush before the process en
 
 ## Consequences
 
-- failures are reported without extra call sites, and activity is visible as counters
+- failures are reported without extra call sites, and activity is visible as counters and
+  distributions
 - an unconfigured bot pays nothing: no client, no transport, no reporting
 - a third party holds error data and controls delivery, so reporting depends on its availability
 - a typo in the destination is silent apart from one warning, which looks like a quiet system

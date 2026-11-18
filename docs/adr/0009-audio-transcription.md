@@ -1,6 +1,7 @@
 # ADR 0009: Transcribe audio in a separate service
 
 - Status: accepted
+- Amended: 2026-11-18, to record video support, the model setting, rendering, and the retry cadence.
 - Date: 2026-11-17
 
 ## Context
@@ -13,6 +14,8 @@ on old files nobody waits for. The audio is a private conversation, and it leave
 transcribed.
 
 ## Decision
+
+ADR 0011 extends this to video: its audio track is extracted first and then follows the same path.
 
 Run transcription as its own long-running task, beside receiving and delivery. It reads a small batch
 of pending audio whose message is recent, downloads each file to a temporary location, asks the model
@@ -29,6 +32,16 @@ nothing, and each skipped attachment logs its chat id so an operator can learn t
 model provider's key and refuse to start without it, because an unconfigured transcriber would leave
 every attachment pending while the process looked healthy.
 
+The model is chosen by `TRANSCRIBE_MODEL_NAME`, defaulting to `google/gemini-3.5-transcribe`;
+temperature is 0, and the caller declares the container format of the bytes.
+
+The transcript is split into chunks of at most 4000 characters, escaped, wrapped in Telegram HTML,
+and only the first chunk answers the source message. The bot sets the eye reaction when it picks an
+attachment up; a failed reaction only warns.
+
+The scan reads ten rows per kind, audio before video, and retries a failing row on the five-second
+idle pause until the window closes; nothing counts attempts.
+
 ## Consequences
 
 - receiving never waits on a model call, so a slow or failing call costs no messages
@@ -39,6 +52,7 @@ every attachment pending while the process looked healthy.
   every field sent is a deliberate disclosure
 - a file that fails permanently is retried until its message ages out, and a pending attachment older
   than the window is never transcribed, with nothing reporting it
+- a failing attachment is retried roughly every five seconds for up to an hour
 - the key is required, so a deployment that only receives messages cannot start without it
 - audio that arrived while the chat list was empty is never transcribed retroactively
 - the model is a third-party identifier that can be retired or repriced, so transcription can break

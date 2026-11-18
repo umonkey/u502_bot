@@ -1,6 +1,7 @@
 # ADR 0013: Wake an idle service instead of waiting out its pause
 
 - Status: accepted
+- Amended: 2026-11-18, so the handle description matches the type.
 - Date: 2026-11-18
 
 ## Context
@@ -14,10 +15,12 @@ spinning.
 
 ## Decision
 
-Give each edge a one-way wake handle, shaped like the shared shutdown flag. The ingestor pulses the
-transcriber after it stores an attachment, and the transcriber pulses the outbox after it queues a
-reply. A pause ends at once when its pulse has arrived, including a pulse that arrived before the
-pause began, and each pulse is consumed once, so a stale one cannot turn the pause into a spin.
+Give each edge a `Wake` handle: a cloneable pair of `notify` and `sleep` over one counter, shaped
+like the shared shutdown flag. Each service uses one side, and the direction is fixed by the
+composition, not by the type. The ingestor pulses the transcriber after it stores an attachment, and
+the transcriber pulses the outbox after it queues a reply. A pause ends at once when its pulse has
+arrived, including a pulse that arrived before the pause began, and each pulse is consumed once, so a
+stale one cannot turn the pause into a spin.
 
 Keep the five-second pause as the backstop that ends an idle wait when no pulse comes. A failed
 attachment stays on that cadence, because no failure path pulses, so the pause remains the retry
@@ -31,6 +34,8 @@ idle wait.
 - a pulse is a hint rather than a command: the worst a mistaken one costs is one extra scan
 - the pause remains a deliberate rate and retry bound, not a leftover
 - no new dependency, schema, or configuration variable
+- a handle carries both channel ends, so a consumer could call `notify` and a producer could `sleep`;
+  code review is the only guard
 
 ## Alternatives considered
 
