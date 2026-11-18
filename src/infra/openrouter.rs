@@ -226,6 +226,24 @@ impl OpenRouter {
     }
 }
 
+impl From<reqwest::Error> for Error {
+    fn from(source: reqwest::Error) -> Self {
+        Self::External {
+            context: "OpenRouter request failed",
+            source: Box::new(source),
+        }
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(source: serde_json::Error) -> Self {
+        Self::External {
+            context: "failed to decode the OpenRouter response",
+            source: Box::new(source),
+        }
+    }
+}
+
 /// One Speech-to-Text request: the model and the audio it should transcribe.
 #[derive(Serialize)]
 struct Request<'a> {
@@ -422,7 +440,11 @@ mod tests {
             r#"{}"#,
         ] {
             assert!(
-                matches!(parse_response(body), Err(Error::ResponseJson(_))),
+                matches!(
+                    parse_response(body),
+                    Err(Error::External { context, .. })
+                        if context == "failed to decode the OpenRouter response"
+                ),
                 "body {body}"
             );
         }
@@ -432,7 +454,8 @@ mod tests {
     fn response_that_is_not_json_is_rejected() {
         assert!(matches!(
             parse_response("<html>bad gateway</html>"),
-            Err(Error::ResponseJson(_))
+            Err(Error::External { context, .. })
+                if context == "failed to decode the OpenRouter response"
         ));
     }
 

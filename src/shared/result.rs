@@ -1,11 +1,15 @@
 //! The crate-wide error type.
 //!
-//! One [`Error`] enum so every failure mode the bot can produce is discoverable from this one
+//! One [`Error`] enum so every failure mode the program acts on is discoverable from this one
 //! file, one [`Result`] alias so every fallible signature reads the same, one variant per failure
 //! mode, and one `Display` implementation that names what failed while
 //! [`Error::source`](std::error::Error::source) chains the cause. The enum is flat rather than
 //! nested per module so a caller never has to import a second type to match a failure; the comment
 //! above each group names the area.
+//!
+//! A failure of an external client is carried by the one [`Error::External`] variant, whose
+//! `context` says what was being done and whose `source` keeps the cause, so this file names no
+//! integration crate. Each `From` conversion lives in the module that owns the client producing it.
 
 use std::fmt;
 use std::io;
@@ -31,29 +35,26 @@ pub enum Error {
     /// One `TRANSCRIBE_CHATS` entry is not a numeric chat id.
     InvalidChatId(String),
 
+    // External clients
+    /// A client call failed; `context` names what was being done, and `source` keeps the cause.
+    External {
+        context: &'static str,
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
     // Database
-    /// SQLite rejected a statement or a connection setting.
-    Database(sqlx::Error),
     /// The directory that should hold the database file could not be created.
     CreateDatabaseDirectory { path: PathBuf, source: io::Error },
 
     // Telegram
-    /// Telegram rejected an API call.
-    TelegramRequest(teloxide::RequestError),
-    /// Telegram accepted the call but the file transfer failed.
-    TelegramDownload(teloxide::DownloadError),
     /// A local destination file could not be created.
     WriteFile { path: PathBuf, source: io::Error },
     /// A stored message id does not fit in Telegram's 32-bit message id.
     MessageIdOutOfRange(i64),
 
     // OpenRouter
-    /// The request could not be sent, or its body could not be read.
-    HttpRequest(reqwest::Error),
     /// OpenRouter answered with a non-success status.
     HttpStatus { status: u16, body: String },
-    /// The response body is not the JSON shape expected.
-    ResponseJson(serde_json::Error),
     /// The audio file could not be read.
     ReadAudioFile { path: PathBuf, source: io::Error },
 
@@ -91,17 +92,13 @@ impl fmt::Display for Error {
                 "{} entry {token:?} is not a numeric chat id",
                 VariableName::TranscribeChats
             ),
-            Self::Database(source) => write!(formatter, "database error: {source}"),
+            Self::External { context, source } => write!(formatter, "{context}: {source}"),
             Self::CreateDatabaseDirectory { path, source } => {
                 write!(
                     formatter,
                     "failed to create database directory {}: {source}",
                     path.display()
                 )
-            }
-            Self::TelegramRequest(source) => write!(formatter, "telegram request error: {source}"),
-            Self::TelegramDownload(source) => {
-                write!(formatter, "telegram download error: {source}")
             }
             Self::WriteFile { path, source } => {
                 write!(formatter, "failed to write {}: {source}", path.display())
@@ -112,15 +109,8 @@ impl fmt::Display for Error {
                     "message id {id} does not fit in a Telegram message id"
                 )
             }
-            Self::HttpRequest(source) => write!(formatter, "OpenRouter request failed: {source}"),
             Self::HttpStatus { status, body } => {
                 write!(formatter, "OpenRouter returned HTTP {status}: {body}")
-            }
-            Self::ResponseJson(source) => {
-                write!(
-                    formatter,
-                    "failed to decode the OpenRouter response: {source}"
-                )
             }
             Self::ReadAudioFile { path, source } => {
                 write!(
@@ -157,11 +147,7 @@ impl std::error::Error for Error {
             | Self::CreateDatabaseDirectory { source, .. }
             | Self::WriteFile { source, .. }
             | Self::ReadAudioFile { source, .. } => Some(source),
-            Self::Database(source) => Some(source),
-            Self::TelegramRequest(source) => Some(source),
-            Self::TelegramDownload(source) => Some(source),
-            Self::HttpRequest(source) => Some(source),
-            Self::ResponseJson(source) => Some(source),
+            Self::External { source, .. } => Some(&**source),
             Self::FfmpegUnavailable(source) | Self::FfmpegIo(source) => Some(source),
             Self::MissingVariable(_)
             | Self::VariableNotUnicode(_)
@@ -173,36 +159,6 @@ impl std::error::Error for Error {
             | Self::NoAudioStream { .. }
             | Self::FfmpegTimeout { .. } => None,
         }
-    }
-}
-
-impl From<sqlx::Error> for Error {
-    fn from(source: sqlx::Error) -> Self {
-        Self::Database(source)
-    }
-}
-
-impl From<teloxide::RequestError> for Error {
-    fn from(source: teloxide::RequestError) -> Self {
-        Self::TelegramRequest(source)
-    }
-}
-
-impl From<teloxide::DownloadError> for Error {
-    fn from(source: teloxide::DownloadError) -> Self {
-        Self::TelegramDownload(source)
-    }
-}
-
-impl From<reqwest::Error> for Error {
-    fn from(source: reqwest::Error) -> Self {
-        Self::HttpRequest(source)
-    }
-}
-
-impl From<serde_json::Error> for Error {
-    fn from(source: serde_json::Error) -> Self {
-        Self::ResponseJson(source)
     }
 }
 
@@ -232,7 +188,10 @@ mod tests {
 
     #[test]
     fn database_error_names_the_cause() {
-        let error = Error::Database(sqlx::Error::RowNotFound);
+        let error = Error::External {
+            context: "database error",
+            source: Box::new(io::Error::other("no rows returned")),
+        };
         let rendered = error.to_string();
 
         assert!(rendered.starts_with("database error: "), "{rendered}");
@@ -241,7 +200,10 @@ mod tests {
 
     #[test]
     fn wrapped_sources_are_exposed() {
-        let wrapped = Error::Database(sqlx::Error::RowNotFound);
+        let wrapped = Error::External {
+            context: "database error",
+            source: Box::new(io::Error::other("no rows returned")),
+        };
         let plain = Error::MissingVariable(VariableName::DatabasePath.as_str().to_owned());
 
         assert!(std::error::Error::source(&wrapped).is_some());

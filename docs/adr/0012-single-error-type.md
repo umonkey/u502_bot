@@ -18,11 +18,18 @@ failure keeps its identity as it crosses layers. Library failures with one obvio
 converted once; failures that need context, such as input and output errors, are translated where
 they happen, so the message names what failed. No dependency is added for this.
 
+A failure of an external client is carried by one `External` variant, whose `context` names the
+operation that failed and whose `source` keeps the cause, so the shared enum names no integration
+crate. Each `From` conversion lives in the module that owns the client producing it.
+
 ## Consequences
 
 - every fallible signature reads the same, and no module exports an error type of its own
 - adding a failure is one entry and one message in one place
-- a caller can name and act on a specific failure, wherever it was produced
+- a caller can name and act on the semantic failures, which are the ones that drive behaviour; a
+  client failure is one `External` variant, matched on its context
+- the shared enum names no integration crate, so it does not change when a client crate does
+- adding an integration is a conversion beside the client rather than a variant in the shared list
 - the shared set grows with the program and needs curating, because it is one flat list
 - a wrapped library failure hides the cases a library upgrade adds until code matches on them
 

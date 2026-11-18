@@ -170,6 +170,24 @@ impl Telegram {
     }
 }
 
+impl From<teloxide::RequestError> for Error {
+    fn from(source: teloxide::RequestError) -> Self {
+        Self::External {
+            context: "telegram request error",
+            source: Box::new(source),
+        }
+    }
+}
+
+impl From<teloxide::DownloadError> for Error {
+    fn from(source: teloxide::DownloadError) -> Self {
+        Self::External {
+            context: "telegram download error",
+            source: Box::new(source),
+        }
+    }
+}
+
 /// Converts a stored message id to the width the Bot API carries, rejecting one it cannot.
 fn message_id_of(id: i64) -> Result<MessageId> {
     let message_id = i32::try_from(id).map_err(|_| Error::MessageIdOutOfRange(id))?;

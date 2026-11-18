@@ -96,6 +96,15 @@ impl Database {
     }
 }
 
+impl From<sqlx::Error> for Error {
+    fn from(source: sqlx::Error) -> Self {
+        Self::External {
+            context: "database error",
+            source: Box::new(source),
+        }
+    }
+}
+
 /// Connection settings shared by file-backed and in-memory databases.
 fn base_options() -> SqliteConnectOptions {
     SqliteConnectOptions::new()
