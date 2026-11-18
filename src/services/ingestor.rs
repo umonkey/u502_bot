@@ -74,7 +74,7 @@ impl Ingestor {
     /// Stores one delivered message and, when it carries media, its attachment.
     ///
     /// The message is written before the attachment, so a later reader can age-bound an attachment
-    /// by the arrival time of the message that carries it.
+    /// by the time Telegram reported for the message that carries it.
     async fn ingest(&self, message: &Message) {
         sentry::message_received();
         tracing::info!(

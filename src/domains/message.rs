@@ -15,7 +15,7 @@ pub struct NewMessage {
     pub chat_id: i64,
     /// Telegram message id, unique within its chat.
     pub message_id: i64,
-    /// Arrival time as Unix epoch seconds, UTC.
+    /// Telegram send time as Unix epoch seconds, UTC.
     pub received_at: i64,
     /// Telegram id of the sender, when the update carries one.
     pub sender_id: Option<i64>,

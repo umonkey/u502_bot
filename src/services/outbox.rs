@@ -12,6 +12,7 @@ use crate::infra::sentry;
 use crate::infra::telegram_bot::Telegram;
 use crate::services::shutdown::Shutdown;
 use crate::services::unix_now;
+use crate::services::unix_now_f64;
 use crate::services::wake::Wake;
 
 /// Rows read per scan.
@@ -91,7 +92,13 @@ impl Outbox {
                     .send(message.chat_id, &message.message, message.thread_id) => result,
                 () = shutdown.wait() => break,
             } {
-                Ok(()) => delivered |= self.mark_sent(&message).await,
+                Ok(()) => {
+                    if let Some(seconds) = reply_latency(message.source_at, unix_now_f64()) {
+                        sentry::transcription_reply_latency(seconds);
+                    }
+
+                    delivered |= self.mark_sent(&message).await;
+                }
                 Err(error) => tracing::error!(
                     outbox_id = message.id,
                     chat_id = message.chat_id,
@@ -126,5 +133,31 @@ impl Outbox {
                 false
             }
         }
+    }
+}
+
+/// Seconds from a source message's Telegram send time to `now`, when the row answers a message.
+///
+/// The raw difference is reported rather than clamped at zero: a persistent negative sample means
+/// the host clock is ahead of Telegram's, which is worth seeing.
+fn reply_latency(source_at: Option<i64>, now: f64) -> Option<f64> {
+    source_at.map(|source_at| now - source_at as f64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reply_latency_measures_from_the_source_send_time() {
+        assert_eq!(
+            reply_latency(Some(1_700_000_000), 1_700_000_012.5),
+            Some(12.5)
+        );
+    }
+
+    #[test]
+    fn reply_latency_is_absent_without_a_source_message() {
+        assert_eq!(reply_latency(None, 1_700_000_012.5), None);
     }
 }

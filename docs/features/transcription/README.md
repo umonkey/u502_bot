@@ -29,6 +29,10 @@ A download or model failure is retried on every scan while the source message is
 
 The loop pauses only when a scan finds nothing to transcribe, and storing a new attachment ends that pause at once. A failed attachment is still retried on the pause's cadence, rather than immediately.
 
+## Reply latency
+
+The delay between a source message's Telegram send time and the moment Telegram accepts the first chunk of its transcript is reported to Sentry as the `transcription.reply.latency` distribution, in seconds.
+
 ## Model selection
 
 The default model is `google/gemini-3.5-transcribe`. `TRANSCRIBE_MODEL_NAME` overrides it, and an empty value falls back to the default. Startup logs `Using model <id> to transcribe; override with TRANSCRIBE_MODEL_NAME` once, so the model that spends the credits is visible in the console and in Sentry's structured logs.

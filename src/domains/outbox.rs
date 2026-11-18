@@ -32,6 +32,10 @@ pub struct PendingMessage {
     pub chat_id: i64,
     /// Telegram message id the delivery replies to; `None` for a plain message.
     pub thread_id: Option<i64>,
+    /// Telegram send time as Unix epoch seconds, UTC, of the message this row answers.
+    ///
+    /// `None` when the row answers no message, or when the `messages` row is missing.
+    pub source_at: Option<i64>,
     /// Text to deliver: escaped Telegram HTML, rendered by the producer.
     pub message: String,
 }
@@ -67,10 +71,17 @@ impl OutboxRepository {
     }
 
     /// Reads up to `limit` undelivered rows, oldest first.
+    ///
+    /// The left join to `messages` fills [`PendingMessage::source_at`] with the source message's
+    /// Telegram send time. A join, rather than an outbox column, needs no migration: the startup
+    /// schema only creates missing tables. The column is `NULL` when the row answers no message
+    /// (`thread_id IS NULL`) or when the `(chat_id, thread_id)` message row is missing.
     pub async fn pending(&self, limit: i64) -> Result<Vec<PendingMessage>> {
         let rows = sqlx::query(
-            "SELECT id, chat_id, thread_id, message FROM outbox \
-             WHERE sent_at IS NULL ORDER BY id LIMIT ?",
+            "SELECT o.id, o.chat_id, o.thread_id, o.message, m.received_at AS source_at \
+             FROM outbox AS o \
+             LEFT JOIN messages AS m ON m.chat_id = o.chat_id AND m.message_id = o.thread_id \
+             WHERE o.sent_at IS NULL ORDER BY o.id LIMIT ?",
         )
         .bind(limit)
         .fetch_all(&self.pool)
@@ -82,6 +93,7 @@ impl OutboxRepository {
                 id: row.get("id"),
                 chat_id: row.get("chat_id"),
                 thread_id: row.get("thread_id"),
+                source_at: row.get("source_at"),
                 message: row.get("message"),
             })
             .collect();
@@ -106,6 +118,7 @@ impl OutboxRepository {
 
 #[cfg(test)]
 mod tests {
+    use crate::domains::message::{MessageRepository, NewMessage};
     use crate::infra::database::Database;
 
     use super::*;
@@ -117,6 +130,23 @@ mod tests {
             added_at: 1_700_000_000,
             message: "hello".to_owned(),
         }
+    }
+
+    /// Stores the message that [`new_outbox_message`] answers, so the join finds it.
+    async fn store_source_message(repository: &OutboxRepository) {
+        let message = NewMessage {
+            chat_id: 42,
+            message_id: 7,
+            received_at: 1_700_000_000,
+            sender_id: None,
+            sender_name: None,
+            text: Some("transcribe me".to_owned()),
+        };
+
+        MessageRepository::new(repository.pool.clone())
+            .store(&message)
+            .await
+            .expect("source message should store");
     }
 
     async fn in_memory_repository() -> OutboxRepository {
@@ -262,5 +292,66 @@ mod tests {
             .expect("pending should succeed");
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].thread_id, None);
+    }
+
+    #[tokio::test]
+    async fn pending_reads_the_source_send_time() {
+        let repository = in_memory_repository().await;
+        store_source_message(&repository).await;
+
+        repository
+            .enqueue(&new_outbox_message())
+            .await
+            .expect("enqueue should succeed");
+
+        let pending = repository
+            .pending(10)
+            .await
+            .expect("pending should succeed");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].source_at, Some(1_700_000_000));
+    }
+
+    #[tokio::test]
+    async fn pending_reports_no_source_time_without_a_thread() {
+        let repository = in_memory_repository().await;
+        store_source_message(&repository).await;
+        let message = NewOutboxMessage {
+            thread_id: None,
+            ..new_outbox_message()
+        };
+
+        repository
+            .enqueue(&message)
+            .await
+            .expect("enqueue should succeed");
+
+        let pending = repository
+            .pending(10)
+            .await
+            .expect("pending should succeed");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].source_at, None);
+    }
+
+    #[tokio::test]
+    async fn pending_reports_no_source_time_when_the_message_is_missing() {
+        let repository = in_memory_repository().await;
+        let message = NewOutboxMessage {
+            thread_id: Some(99),
+            ..new_outbox_message()
+        };
+
+        repository
+            .enqueue(&message)
+            .await
+            .expect("enqueue should succeed");
+
+        let pending = repository
+            .pending(10)
+            .await
+            .expect("pending should succeed");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].source_at, None);
     }
 }

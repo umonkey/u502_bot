@@ -25,3 +25,14 @@ pub(crate) fn unix_now() -> i64 {
         Err(_) => 0,
     }
 }
+
+/// Current Unix time in seconds, UTC, with the sub-second part kept.
+///
+/// Used to time a measurement whose other end, Telegram's own timestamp, is whole seconds. Falls
+/// back to `0.0` like [`unix_now`] when the clock is before the epoch.
+pub(crate) fn unix_now_f64() -> f64 {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(elapsed) => elapsed.as_secs_f64(),
+        Err(_) => 0.0,
+    }
+}

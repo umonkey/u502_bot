@@ -47,6 +47,9 @@ pub const OUTBOX_MESSAGES_ADDED: &str = "outbox.messages.added";
 /// Application metric counting every outbox message Telegram accepted.
 pub const OUTBOX_MESSAGES_SENT: &str = "outbox.messages.sent";
 
+/// Application metric measuring the delay between a source message and its reply, in seconds.
+pub const TRANSCRIPTION_REPLY_LATENCY: &str = "transcription.reply.latency";
+
 /// Application metric counting every OpenRouter call, successful or not.
 pub const OPENROUTER_CALLS: &str = "openrouter.calls";
 
@@ -155,6 +158,13 @@ pub fn outbox_added() {
 /// Records one outbox message Telegram accepted.
 pub fn outbox_sent() {
     sentry::metrics::counter(OUTBOX_MESSAGES_SENT, 1).capture();
+}
+
+/// Records the delay between the source message Telegram saw and the reply Telegram accepted.
+pub fn transcription_reply_latency(seconds: f64) {
+    sentry::metrics::distribution(TRANSCRIPTION_REPLY_LATENCY, seconds)
+        .unit(Unit::Second)
+        .capture();
 }
 
 /// Records one OpenRouter call, successful or not, and how long it took.
@@ -279,6 +289,7 @@ mod tests {
     fn outbox_metrics_are_safe_without_client() {
         outbox_added();
         outbox_sent();
+        transcription_reply_latency(1.5);
     }
 
     #[test]
