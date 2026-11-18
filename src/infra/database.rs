@@ -42,9 +42,11 @@ impl Database {
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
         {
-            std::fs::create_dir_all(parent).map_err(|source| Error::CreateDatabaseDirectory {
-                path: parent.to_path_buf(),
-                source,
+            tokio::fs::create_dir_all(parent).await.map_err(|source| {
+                Error::CreateDatabaseDirectory {
+                    path: parent.to_path_buf(),
+                    source,
+                }
             })?;
         }
 

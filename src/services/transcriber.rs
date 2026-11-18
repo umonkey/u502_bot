@@ -10,7 +10,9 @@
 //! progress; a reaction that fails only logs a warning, because it must never cost a transcript.
 //!
 //! The one-hour window bounds both cost and retries: a file that keeps failing is retried on every
-//! scan until its message ages out, and then left alone. The whitelist the composition root resolved
+//! scan until its message ages out, and then left alone. A failure a retry could not change — a
+//! video with no audio track, a host without ffmpeg, or audio above the client's input limit — is
+//! skipped and marked processed instead. The whitelist the composition root resolved
 //! limits which chats are transcribed at all, because a transcription spends credits and sends audio
 //! to a third party. An empty one transcribes nothing and the skip warnings publish the chat ids an
 //! operator needs before the list is known.
@@ -231,8 +233,8 @@ impl Transcriber {
         }
 
         match attachment.kind {
-            AttachmentKind::Audio => self.process_audio(&attachment, now, shutdown).await,
-            AttachmentKind::Video => self.process_video(&attachment, now, shutdown).await,
+            AttachmentKind::Audio => self.process_audio(attachment, now, shutdown).await,
+            AttachmentKind::Video => self.process_video(attachment, now, shutdown).await,
         }
     }
 
@@ -242,22 +244,36 @@ impl Transcriber {
     /// Telegram reported; only the video branch extracts and re-encodes.
     async fn process_audio(
         &self,
-        attachment: &PendingAttachment,
+        attachment: PendingAttachment,
         now: i64,
         shutdown: &mut Shutdown,
     ) -> bool {
-        let directory = match tempfile::tempdir() {
+        let directory = match TemporaryDirectory::create().await {
             Ok(directory) => directory,
             Err(error) => {
-                log_failure(attachment, &error);
+                log_failure(&attachment, &error);
 
                 return false;
             }
         };
-        let path = directory.path().join("audio");
 
+        let outcome = self
+            .process_audio_file(&attachment, &directory.path().join("audio"), now, shutdown)
+            .await;
+        directory.remove().await;
+
+        outcome
+    }
+
+    async fn process_audio_file(
+        &self,
+        attachment: &PendingAttachment,
+        path: &std::path::Path,
+        now: i64,
+        shutdown: &mut Shutdown,
+    ) -> bool {
         let downloaded = tokio::select! {
-            result = self.telegram.download(&attachment.file_id, &path) => result,
+            result = self.telegram.download(&attachment.file_id, path) => result,
             () = shutdown.wait() => return false,
         };
         if let Err(error) = downloaded {
@@ -268,18 +284,33 @@ impl Transcriber {
 
         let transcribed = tokio::select! {
             result = self.openrouter.transcribe_audio(
-                &path,
+                path,
                 AudioFormat::from_mime_type(attachment.mime_type.as_deref()),
             ) => result,
             () = shutdown.wait() => return false,
         };
         let transcript = match transcribed {
             Ok(transcript) => transcript,
-            Err(error) => {
-                log_failure(attachment, &error);
+            Err(error) => match &error {
+                Error::AudioTooLarge { bytes, max } => {
+                    tracing::warn!(
+                        attachment_id = attachment.id,
+                        chat_id = attachment.chat_id,
+                        message_id = attachment.message_id,
+                        kind = attachment.kind.as_str(),
+                        bytes,
+                        max,
+                        "Skipped an attachment: its audio is above the transcription input limit"
+                    );
 
-                return false;
-            }
+                    return self.mark_processed(attachment).await;
+                }
+                _ => {
+                    log_failure(attachment, &error);
+
+                    return false;
+                }
+            },
         };
 
         self.finish(attachment, &transcript, now).await
@@ -290,22 +321,39 @@ impl Transcriber {
     /// The extracted stream is fixed at Ogg/Opus 16 kHz mono, so the request declares
     /// [`AudioFormat::Ogg`] unconditionally. A video with no audio track or a host without ffmpeg is
     /// skipped and marked processed: retrying it could not change the outcome, and the window would
-    /// keep paying for it.
+    /// keep paying for it. The client's input limit applies to the extracted audio, which a long
+    /// video can push past it even though the video itself downloads fine.
     async fn process_video(
         &self,
-        attachment: &PendingAttachment,
+        attachment: PendingAttachment,
         now: i64,
         shutdown: &mut Shutdown,
     ) -> bool {
-        let directory = match tempfile::tempdir() {
+        let directory = match TemporaryDirectory::create().await {
             Ok(directory) => directory,
             Err(error) => {
-                log_failure(attachment, &error);
+                log_failure(&attachment, &error);
 
                 return false;
             }
         };
-        let video = directory.path().join("video");
+
+        let outcome = self
+            .process_video_file(&attachment, directory.path(), now, shutdown)
+            .await;
+        directory.remove().await;
+
+        outcome
+    }
+
+    async fn process_video_file(
+        &self,
+        attachment: &PendingAttachment,
+        directory: &std::path::Path,
+        now: i64,
+        shutdown: &mut Shutdown,
+    ) -> bool {
+        let video = directory.join("video");
 
         let downloaded = tokio::select! {
             result = self.telegram.download(&attachment.file_id, &video) => result,
@@ -317,7 +365,7 @@ impl Transcriber {
             return false;
         }
 
-        let audio = directory.path().join("audio.ogg");
+        let audio = directory.join("audio.ogg");
         let extracted = tokio::select! {
             result = self.ffmpeg.extract_audio(&video, &audio) => result,
             () = shutdown.wait() => return false,
@@ -349,11 +397,26 @@ impl Transcriber {
         };
         let transcript = match transcribed {
             Ok(transcript) => transcript,
-            Err(error) => {
-                log_failure(attachment, &error);
+            Err(error) => match &error {
+                Error::AudioTooLarge { bytes, max } => {
+                    tracing::warn!(
+                        attachment_id = attachment.id,
+                        chat_id = attachment.chat_id,
+                        message_id = attachment.message_id,
+                        kind = attachment.kind.as_str(),
+                        bytes,
+                        max,
+                        "Skipped an attachment: its audio is above the transcription input limit"
+                    );
 
-                return false;
-            }
+                    return self.mark_processed(attachment).await;
+                }
+                _ => {
+                    log_failure(attachment, &error);
+
+                    return false;
+                }
+            },
         };
 
         self.finish(attachment, &transcript, now).await
@@ -426,6 +489,37 @@ impl Transcriber {
 
                 false
             }
+        }
+    }
+}
+
+/// A temporary directory created and removed off the runtime's workers.
+///
+/// `mkdtemp` and the recursive removal behind `TempDir`'s drop are filesystem calls; the fallback
+/// drop keeps cleanup working if the task is cancelled between `create` and `remove`.
+struct TemporaryDirectory {
+    directory: tempfile::TempDir,
+}
+
+impl TemporaryDirectory {
+    async fn create() -> std::io::Result<Self> {
+        tokio::task::spawn_blocking(tempfile::tempdir)
+            .await
+            .map_err(std::io::Error::other)?
+            .map(|directory| Self { directory })
+    }
+
+    fn path(&self) -> &std::path::Path {
+        self.directory.path()
+    }
+
+    async fn remove(self) {
+        let Self { directory } = self;
+        if let Err(error) = tokio::task::spawn_blocking(move || drop(directory)).await {
+            tracing::debug!(
+                error = &error as &dyn std::error::Error,
+                "Failed to remove a temporary directory"
+            );
         }
     }
 }

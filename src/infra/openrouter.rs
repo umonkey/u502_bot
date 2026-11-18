@@ -9,6 +9,9 @@
 //! branch sends the downloaded file untouched and maps its MIME type, while the video branch
 //! extracts the audio track to Ogg and passes [`AudioFormat::Ogg`] unconditionally.
 //!
+//! The client refuses audio above its own input ceiling before allocating, so the peak of one
+//! request is the request body.
+//!
 //! The client records its own telemetry: the call counter and duration are captured for failed
 //! calls too, and only this module knows that a call happened. Failures are returned to the caller,
 //! which logs them once with the attachment they belong to.
@@ -18,7 +21,9 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use serde::{Deserialize, Serialize};
+use reqwest::header::CONTENT_TYPE;
+use serde::Deserialize;
+use tokio::io::AsyncReadExt;
 
 use crate::infra::sentry;
 use crate::shared::config::VariableName;
@@ -32,6 +37,14 @@ const TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Characters of an error body kept for the logs.
 const MAX_ERROR_BODY: usize = 500;
+
+/// Largest audio this client will upload: the Bot API `getFile` ceiling, so no attachment can
+/// exceed it.
+const MAX_AUDIO_BYTES: u64 = 20 * 1024 * 1024;
+
+/// Bytes read per encode step. A multiple of three, so every chunk but the last encodes without
+/// padding.
+const IO_CHUNK: usize = 3 * 32 * 1024;
 
 /// The container name sent as `input_audio.format`.
 ///
@@ -121,9 +134,9 @@ impl OpenRouter {
 
     /// Transcribes one audio file and returns the text the model produced.
     ///
-    /// The file is read whole and base64-encoded, because that is what `input_audio` carries. One
-    /// request, one transcript, no options that would change the answer. `format` describes the
-    /// bytes the caller wrote; nothing here transcodes.
+    /// A file above [`MAX_AUDIO_BYTES`] is rejected with [`Error::AudioTooLarge`] before anything is
+    /// allocated. One request, one transcript, no options that would change the answer. `format`
+    /// describes the bytes the caller wrote; nothing here transcodes.
     /// The call counter and duration are recorded on every path; usage is recorded only when
     /// OpenRouter reports it. Failures are returned so the caller can log them with context.
     pub async fn transcribe_audio(&self, path: &Path, format: AudioFormat) -> Result<String> {
@@ -155,29 +168,14 @@ impl OpenRouter {
     }
 
     async fn request(&self, path: &Path, format: AudioFormat) -> Result<(String, Option<Usage>)> {
-        let audio = tokio::fs::read(path)
-            .await
-            .map_err(|source| Error::ReadAudioFile {
-                path: path.to_path_buf(),
-                source,
-            })?;
-
-        let data = STANDARD.encode(audio);
-        let request = Request {
-            model: &self.model,
-            input_audio: InputAudio {
-                data: &data,
-                // The caller downloaded or extracted these bytes, so it knows the format.
-                format: format.as_str(),
-            },
-            temperature: 0,
-        };
+        let body = request_body(path, &self.model, format).await?;
 
         let response = self
             .client
             .post(ENDPOINT)
             .bearer_auth(&self.api_key)
-            .json(&request)
+            .header(CONTENT_TYPE, "application/json")
+            .body(body)
             .send()
             .await?;
 
@@ -193,6 +191,91 @@ impl OpenRouter {
 
         parse_response(&body)
     }
+}
+
+/// Builds the body without holding the file or an encoded copy.
+async fn request_body(path: &Path, model: &str, format: AudioFormat) -> Result<Vec<u8>> {
+    let mut audio = tokio::fs::File::open(path)
+        .await
+        .map_err(|source| Error::ReadAudioFile {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let bytes = audio
+        .metadata()
+        .await
+        .map_err(|source| Error::ReadAudioFile {
+            path: path.to_path_buf(),
+            source,
+        })?
+        .len();
+    if bytes > MAX_AUDIO_BYTES {
+        return Err(Error::AudioTooLarge {
+            bytes,
+            max: MAX_AUDIO_BYTES,
+        });
+    }
+    let bytes = usize::try_from(bytes).map_err(|_| Error::AudioTooLarge {
+        bytes,
+        max: MAX_AUDIO_BYTES,
+    })?;
+
+    // A JSON string literal: `Value`'s Display escapes it, so a model id cannot break the body.
+    let model = serde_json::Value::String(model.to_owned()).to_string();
+    let head = format!("{{\"model\":{model},\"input_audio\":{{\"data\":\"");
+    let tail = format!(
+        "\",\"format\":\"{}\"}},\"temperature\":0}}",
+        format.as_str()
+    );
+
+    let mut body = Vec::with_capacity(head.len() + bytes.div_ceil(3) * 4 + tail.len());
+    body.extend_from_slice(head.as_bytes());
+
+    let mut chunk = vec![0u8; IO_CHUNK];
+    let mut filled = 0;
+    loop {
+        // A read can be short, so fill the buffer before encoding: padding is only valid once,
+        // at the end of the stream.
+        let read =
+            audio
+                .read(&mut chunk[filled..])
+                .await
+                .map_err(|source| Error::ReadAudioFile {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+        if read == 0 {
+            break;
+        }
+        filled += read;
+        if filled == chunk.len() {
+            append_encoded(&mut body, &chunk, path)?;
+            filled = 0;
+        }
+    }
+    if filled > 0 {
+        append_encoded(&mut body, &chunk[..filled], path)?;
+    }
+
+    body.extend_from_slice(tail.as_bytes());
+
+    Ok(body)
+}
+
+/// Appends `input` as base64; the destination is sized from it, so the only failure the cap leaves
+/// is an input too large for the platform.
+fn append_encoded(body: &mut Vec<u8>, input: &[u8], path: &Path) -> Result<()> {
+    let encoded = input.len().div_ceil(3) * 4;
+    let start = body.len();
+    body.resize(start + encoded, 0);
+    STANDARD
+        .encode_slice(input, &mut body[start..])
+        .map_err(|source| Error::ReadAudioFile {
+            path: path.to_path_buf(),
+            source: std::io::Error::other(source),
+        })?;
+
+    Ok(())
 }
 
 impl From<reqwest::Error> for Error {
@@ -211,20 +294,6 @@ impl From<serde_json::Error> for Error {
             source: Box::new(source),
         }
     }
-}
-
-/// One Speech-to-Text request: the model and the audio it should transcribe.
-#[derive(Serialize)]
-struct Request<'a> {
-    model: &'a str,
-    input_audio: InputAudio<'a>,
-    temperature: u8,
-}
-
-#[derive(Serialize)]
-struct InputAudio<'a> {
-    data: &'a str,
-    format: &'static str,
 }
 
 /// The part of a Speech-to-Text response this module reads.
@@ -424,6 +493,86 @@ mod tests {
         let body = "x".repeat(MAX_ERROR_BODY * 2);
         assert_eq!(truncate(&body).chars().count(), MAX_ERROR_BODY);
         assert_eq!(truncate("short"), "short");
+    }
+
+    /// The body [`request_body`] wrote, read back. `data` borrows from it, so a maximum-size test
+    /// parses the body without a second copy.
+    #[derive(Deserialize)]
+    struct Body<'a> {
+        model: String,
+        #[serde(borrow)]
+        input_audio: InputAudio<'a>,
+        temperature: u8,
+    }
+
+    #[derive(Deserialize)]
+    struct InputAudio<'a> {
+        data: &'a str,
+        format: &'a str,
+    }
+
+    #[tokio::test]
+    async fn body_carries_the_model_format_and_audio() {
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        let path = directory.path().join("audio");
+        let input = [0u8, 1, 2, 3, 4];
+        std::fs::write(&path, input).expect("audio file should be written");
+
+        let body = request_body(&path, "a\"b", AudioFormat::Ogg)
+            .await
+            .expect("body should be built");
+        let body: Body<'_> = serde_json::from_slice(&body).expect("body should parse");
+
+        assert_eq!(body.model, "a\"b");
+        assert_eq!(body.input_audio.format, "ogg");
+        assert_eq!(body.temperature, 0);
+        assert_eq!(
+            STANDARD
+                .decode(body.input_audio.data)
+                .expect("data should decode"),
+            input
+        );
+    }
+
+    #[tokio::test]
+    async fn a_maximum_size_audio_file_is_accepted() {
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        let path = directory.path().join("audio");
+        // Sparse, so the test does not write 20 MB; only the reads touch the file.
+        std::fs::File::create(&path)
+            .expect("audio file should be created")
+            .set_len(MAX_AUDIO_BYTES)
+            .expect("audio file should be sized");
+
+        let body = request_body(&path, "model", AudioFormat::Ogg)
+            .await
+            .expect("the maximum size should be accepted");
+        let body: Body<'_> = serde_json::from_slice(&body).expect("body should parse");
+
+        assert_eq!(
+            body.input_audio.data.len() as u64,
+            MAX_AUDIO_BYTES.div_ceil(3) * 4
+        );
+    }
+
+    #[tokio::test]
+    async fn audio_above_the_maximum_is_rejected() {
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        let path = directory.path().join("audio");
+        std::fs::File::create(&path)
+            .expect("audio file should be created")
+            .set_len(MAX_AUDIO_BYTES + 1)
+            .expect("audio file should be sized");
+
+        let error = request_body(&path, "model", AudioFormat::Ogg)
+            .await
+            .expect_err("a file above the maximum should be rejected");
+
+        assert!(matches!(
+            error,
+            Error::AudioTooLarge { bytes, max }
+                if bytes == MAX_AUDIO_BYTES + 1 && max == MAX_AUDIO_BYTES
+        ));
     }
 
     #[tokio::test]

@@ -85,6 +85,8 @@ pub enum Error {
     HttpStatus { status: u16, body: String },
     /// The audio file could not be read.
     ReadAudioFile { path: PathBuf, source: io::Error },
+    /// The audio about to be sent is larger than the transcription input limit.
+    AudioTooLarge { bytes: u64, max: u64 },
 
     // ffmpeg
     /// The binary is missing or not on `PATH`.
@@ -153,6 +155,12 @@ impl fmt::Display for Error {
                     path.display()
                 )
             }
+            Self::AudioTooLarge { bytes, max } => {
+                write!(
+                    formatter,
+                    "audio of {bytes} bytes exceeds the {max}-byte transcription input limit"
+                )
+            }
             Self::FfmpegUnavailable(source) => {
                 write!(formatter, "ffmpeg is not available: {source}")
             }
@@ -189,6 +197,7 @@ impl std::error::Error for Error {
             | Self::InvalidChatId(_)
             | Self::MessageIdOutOfRange(_)
             | Self::HttpStatus { .. }
+            | Self::AudioTooLarge { .. }
             | Self::FfmpegStatus { .. }
             | Self::NoAudioStream { .. }
             | Self::FfmpegTimeout { .. } => None,
@@ -219,6 +228,19 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "TRANSCRIBE_CHATS entry \"not-a-number\" is not a numeric chat id"
+        );
+    }
+
+    #[test]
+    fn audio_too_large_names_both_numbers() {
+        let error = Error::AudioTooLarge {
+            bytes: 21_000_000,
+            max: 20_971_520,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "audio of 21000000 bytes exceeds the 20971520-byte transcription input limit"
         );
     }
 

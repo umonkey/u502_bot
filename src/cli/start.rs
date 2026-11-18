@@ -25,13 +25,13 @@ use crate::services::wake::Wake;
 use crate::shared::result::Result;
 
 pub async fn run() -> ExitCode {
-    let settings = Settings::load();
+    let settings = Settings::load().await;
 
     // Configuration is loaded before the subscriber exists, so the DSN comes from the settings when
     // they load and is resolved once more, best effort, when they do not.
     let _sentry_guard = match &settings {
         Ok(settings) => sentry::init(&settings.sentry_dsn),
-        Err(_) => sentry::init(&config::sentry_dsn()),
+        Err(_) => sentry::init(&config::sentry_dsn().await),
     };
 
     let outcome = match settings {

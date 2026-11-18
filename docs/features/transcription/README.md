@@ -10,6 +10,10 @@ An audio attachment is downloaded to a temporary file and sent to OpenRouter unt
 
 A video is downloaded the same way, then `ffmpeg` extracts its first audio track into 16 kHz mono Ogg/Opus, and that file follows the audio path. `ffmpeg` ships in the runtime image.
 
+## Memory
+
+An attachment is never held whole. The OpenRouter client streams the file from disk in 96 KiB reads and base64-encodes each chunk straight into one JSON body allocated at its final size, so a request peaks at that body alone: about 4/3 of the input, roughly 28 MB at the 20 MB limit. No full-file copy and no intermediate base64 string exist. Audio above that limit is rejected before anything is allocated; see [ADR 0015](../../adr/0015-bound-transcription-memory.md).
+
 ## Acknowledgement
 
 The bot sets the 👀 reaction on a message when it begins transcribing its audio or video, before the download, so the eye appears before the slow part of the work. The reaction is best effort: a failure is logged and the transcription continues. It stays on the message after the transcript is delivered. A chat that does not allow the bot to react only produces a warning.
@@ -19,6 +23,7 @@ The bot sets the 👀 reaction on a message when it begins transcribing its audi
 Some attachments are marked processed without a transcript, because a retry could not change the outcome:
 
 - files above the Bot API download ceiling of 20 MB
+- audio above the 20 MB transcription input limit, which is the Bot API download ceiling and therefore only reachable for the audio extracted from a long video
 - videos with no audio track
 - videos when no usable `ffmpeg` is available
 - silent audio, whose empty transcript produces no reply

@@ -5,10 +5,10 @@ description: Use when creating or editing an architecture decision record under 
 
 # Architecture decision records
 
-An ADR records why a decision was made and what it affects: the forces at play,
-the choice made, and the consequences accepted. It explains why the system is
-the way it is, not how to build it. One decision per file, named
-`NNNN-short-slug.md`.
+An ADR answers two questions: what changed architecturally, and why it was
+needed. It records the forces at play, the choice made, and the consequences
+accepted, at a level a future reader can act on without reading the code. One
+decision per file, named `NNNN-short-slug.md`.
 
 ## Format
 
@@ -34,57 +34,55 @@ reference allowed is a supersession, expressed in `Status` as
 - `## Alternatives considered`: what was rejected and why.
 - `## Revisit` (optional): the trigger that should reopen the decision.
 
-## Be concise
+## Shape
 
-An ADR is read to learn why something is the way it is, not to review the
-discussion. Aim for well under a page: one short paragraph per narrative
-section, and no more than a few bullets.
+Aim for well under a page: one short paragraph per narrative section and no
+more than a few bullets. A complete ADR is often this small:
 
-- State the decision once, in `## Decision`; do not restate it in Context
-  or rephrase it as a benefit in Consequences.
-- Keep only the trade-offs a reader would act on, and use plain bullets
-  rather than positive, negative, and neutral groupings unless that split
-  carries meaning.
+```text
+Context: one paragraph on the forces and why now.
+Decision: one paragraph on the choice.
+Consequences: a handful of plain bullets.
+Alternatives: one line each.
+```
+
+- State the decision once, in `## Decision`; do not restate it in Context or
+  rephrase it as a benefit in Consequences.
+- Consequences add only what the reader cannot infer, as plain bullets rather
+  than positive, negative, and neutral groupings.
 - One line per alternative: what it was and why it was rejected.
 - Omit any section that carries no information; `Revisit` stays only when it
   names a real trigger.
-- Prefer deleting a sentence to shortening it, and drop any paragraph that
-  restates an earlier one.
+- Prefer deleting a sentence to shortening it.
 
-## Keep it high level
+## Leave out implementation
 
-An ADR records the problem, the forces at play, the choice made, the trade-offs
-accepted, and the impact, in business language. Document why the decision was
-made and what it affects. Write for a future reader who needs the reasoning, not
-the implementation. An ADR answers two questions only: what changed
-architecturally, and why it was needed. State the decision and its trade-offs,
-then stop.
+Write in business language for a reader who was not in the discussion. Do not
+include:
 
-Leave out implementation detail and incident-specific facts:
+- code snippets, symbols, functions, types, constants, enum values, modules, or
+  file paths;
+- products, libraries, versions, and feature flags;
+- schemas, queries, tables, columns, and indexes;
+- endpoints, interfaces, and the modules that own them;
+- configuration keys, log and metric names, status codes, thresholds, formats,
+  and field names;
+- issue, ticket, or pull-request identifiers, and the incident that prompted the
+  record;
+- worked examples and step-by-step procedures.
 
-- code snippets, function and type names, constants, enum values, and source
-  module or file paths;
-- libraries, drivers, and storage engines named as products, with the versions
-  or feature choices that selected them;
-- SQL statements, schema definitions, and table, column, or index details;
-- API and module surfaces: endpoints, public interfaces, and the modules that
-  own them;
-- configuration keys, log event names, tag or metric names, status codes,
-  thresholds, formats, and field names;
-- incident, issue, ticket, or pull-request identifiers, and the specific
-  reproduction that prompted the record;
-- worked examples, alert-rule settings, and step-by-step procedures.
+Describe the shape of the problem, not the incident that revealed it. If a
+sentence needs a symbol or a number to make its point, it describes a design;
+put that detail in feature docs, reference docs, or the change description.
 
-Describe the class of failure or the shape of the problem, not the incident that
-revealed it. Put the concrete names, values, and reproduction in the feature
-docs, reference docs, code, or the change description, and point to them when
-the detail matters. If the file needs a symbol or a number to make its point, it
-is describing a design rather than a decision. If it runs past about a page, it
-is probably a design too.
+## Checklist before finishing
 
-Finally, check the record against a reader who was not in the discussion: if
-they could not act on the decision without reading the implementation, the ADR
-is too detailed.
+- Context names the forces, not the decision.
+- The decision appears once.
+- Every consequence follows from the decision and is not restated elsewhere.
+- Every alternative fits on one line.
+- Deleting any sentence would lose meaning.
+- A reader who missed the discussion can act on it.
 
 ## Rules
 

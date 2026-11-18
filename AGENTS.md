@@ -47,7 +47,7 @@ Running `make` without a target executes `check`.
 - `src/infra/config.rs`: `Settings`, `Whitelist`, and `DEFAULT_TRANSCRIBE_MODEL`; the only place the environment is read, one resolver gives every variable the same form: `<NAME>_FILE` first, then `<NAME>`, the value trimmed, blank meaning unset, UTF-8 only. One failure policy covers every field: absence is fatal only for the required values, absence of an optional value takes its default, and a present but unusable value fails startup.
 - `src/infra/database.rs`: `Database` and `SCHEMA`; the async SQLite client, which opens a pool of connections and applies the embedded schema without knowing any table.
 - `src/infra/ffmpeg.rs`: `Ffmpeg`; the client for the `ffmpeg` program, which extracts a video's first audio track to Ogg/Opus under a timeout, kills the child on drop, and records its own call telemetry. The program is the `ffmpeg` on `PATH`.
-- `src/infra/openrouter.rs`: `OpenRouter` and `AudioFormat`; the Speech-to-Text client for audio transcription, built from the key and the model the composition root resolved, which records its own call telemetry.
+- `src/infra/openrouter.rs`: `OpenRouter` and `AudioFormat`; the Speech-to-Text client for audio transcription, built from the key and the model the composition root resolved, which records its own call telemetry. It refuses audio above its own 20 MB input cap and builds the request body by encoding the file in chunks straight into one preallocated buffer, so a request peaks at the body rather than at several copies of the input.
 - `src/infra/sentry.rs`: `init`, which takes the DSN as a value and installs the `tracing` subscriber, the optional Sentry client, an error layer, and a crate-scoped structured-log layer, and the metric functions for messages, attachments, the outbox, OpenRouter, and ffmpeg.
 - `src/infra/signal.rs`: `Signal` and `wait`; the listener for `SIGINT` and, on Unix, `SIGTERM`.
 - `src/infra/telegram_bot.rs`: `Telegram` and `Messages`, the Telegram client; it receives, downloads, reacts, and sends, and knows nothing about storage.
@@ -137,6 +137,7 @@ Architecture decisions live in `docs/adr/`, one Markdown file per decision, name
 - ADR 0012 records the decision to keep one crate-wide error enum and one `Result` alias.
 - ADR 0013 records the decision to wake an idle service instead of waiting out its pause.
 - ADR 0014 records the decision to resolve configuration into a typed `Settings`.
+- ADR 0015 records the decision to bound transcription memory and keep filesystem calls off the async runtime.
 
 Run `make format-docs` after editing anything under `docs/`.
 
