@@ -16,15 +16,13 @@ use std::time::{Duration, Instant};
 
 use crate::infra::sentry;
 use crate::shared::result::{Error, Result};
+use crate::shared::text::truncate;
 
 /// Program name looked up on the inherited `PATH`.
 const DEFAULT_FFMPEG: &str = "ffmpeg";
 
 /// Extraction timeout: a safety net for a pathological input, not a working constraint.
 const TIMEOUT: Duration = Duration::from_secs(120);
-
-/// Characters of an error body kept for the logs.
-const MAX_ERROR_BODY: usize = 500;
 
 /// Client for the `ffmpeg` command-line program.
 pub struct Ffmpeg {
@@ -166,14 +164,6 @@ fn is_missing_audio(stderr: &str) -> bool {
     .any(|marker| stderr.contains(marker))
 }
 
-/// Keeps at most [`MAX_ERROR_BODY`] characters of an error body, on a character boundary.
-fn truncate(body: &str) -> String {
-    match body.char_indices().nth(MAX_ERROR_BODY) {
-        Some((index, _)) => body[..index].to_owned(),
-        None => body.to_owned(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,13 +223,6 @@ mod tests {
         ] {
             assert!(!is_missing_audio(stderr), "stderr {stderr:?}");
         }
-    }
-
-    #[test]
-    fn long_error_bodies_are_truncated() {
-        let body = "x".repeat(MAX_ERROR_BODY * 2);
-        assert_eq!(truncate(&body).chars().count(), MAX_ERROR_BODY);
-        assert_eq!(truncate("short"), "short");
     }
 
     #[tokio::test]

@@ -6,10 +6,9 @@
 
 use teloxide::types::{Message, User};
 
-use crate::domains::attachment::{
-    AttachmentKind, InsertOutcome as AttachmentOutcome, NewAttachment,
-};
-use crate::domains::message::{InsertOutcome as MessageOutcome, MessageRepository, NewMessage};
+use crate::domains::InsertOutcome;
+use crate::domains::attachment::{AttachmentKind, NewAttachment};
+use crate::domains::message::{MessageRepository, NewMessage};
 use crate::infra::sentry;
 use crate::infra::telegram_bot::Messages;
 use crate::services::shutdown::Shutdown;
@@ -101,7 +100,7 @@ impl Ingestor {
         {
             Ok(outcome) => {
                 sentry::message_stored();
-                if outcome.message == MessageOutcome::Duplicate {
+                if outcome.message == InsertOutcome::Duplicate {
                     tracing::info!(
                         chat_id = message.chat.id.0,
                         message_id = message.id.0,
@@ -110,12 +109,12 @@ impl Ingestor {
                 }
 
                 match outcome.attachment {
-                    Some(AttachmentOutcome::Stored) => {
+                    Some(InsertOutcome::Stored) => {
                         sentry::attachment_stored();
                         // The transcriber is idle-waiting on this edge; end its pause now.
                         self.pending_attachments.notify();
                     }
-                    Some(AttachmentOutcome::Duplicate) => {
+                    Some(InsertOutcome::Duplicate) => {
                         sentry::attachment_stored();
                         tracing::info!(
                             chat_id = message.chat.id.0,

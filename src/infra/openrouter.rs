@@ -28,15 +28,13 @@ use tokio::io::AsyncReadExt;
 use crate::infra::sentry;
 use crate::shared::config::VariableName;
 use crate::shared::result::{Error, Operation, Result};
+use crate::shared::text::truncate;
 
 /// Speech-to-Text endpoint.
 const ENDPOINT: &str = "https://openrouter.ai/api/v1/audio/transcriptions";
 
 /// Request timeout: long enough for a slow model, short enough to bound a stuck call.
 const TIMEOUT: Duration = Duration::from_secs(120);
-
-/// Characters of an error body kept for the logs.
-const MAX_ERROR_BODY: usize = 500;
 
 /// Largest audio this client will upload: the Bot API `getFile` ceiling, so no attachment can
 /// exceed it.
@@ -335,14 +333,6 @@ fn parse_response(body: &str) -> Result<(String, Option<Usage>)> {
     Ok((response.text, response.usage))
 }
 
-/// Keeps at most [`MAX_ERROR_BODY`] characters of an error body, on a character boundary.
-fn truncate(body: &str) -> String {
-    match body.char_indices().nth(MAX_ERROR_BODY) {
-        Some((index, _)) => body[..index].to_owned(),
-        None => body.to_owned(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -486,13 +476,6 @@ mod tests {
                 ..
             })
         ));
-    }
-
-    #[test]
-    fn long_error_bodies_are_truncated() {
-        let body = "x".repeat(MAX_ERROR_BODY * 2);
-        assert_eq!(truncate(&body).chars().count(), MAX_ERROR_BODY);
-        assert_eq!(truncate("short"), "short");
     }
 
     /// The body [`request_body`] wrote, read back. `data` borrows from it, so a maximum-size test

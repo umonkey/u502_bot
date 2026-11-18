@@ -11,18 +11,11 @@ use crate::domains::outbox::{OutboxRepository, PendingMessage};
 use crate::infra::sentry;
 use crate::infra::telegram_bot::Telegram;
 use crate::services::shutdown::Shutdown;
-use crate::services::unix_now;
-use crate::services::unix_now_f64;
 use crate::services::wake::Wake;
-
-/// Rows read per scan.
-const BATCH: i64 = 10;
+use crate::services::{BATCH, IDLE, unix_now, unix_now_f64};
 
 /// Pause between two sends, so a burst does not hit Telegram's rate limit.
 const SEND_DELAY: Duration = Duration::from_secs(2);
-
-/// Pause when the queue is empty, or when nothing in the batch could be delivered.
-const IDLE: Duration = Duration::from_secs(5);
 
 /// Delivers the messages queued in the outbox.
 pub struct Outbox {

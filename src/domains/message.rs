@@ -7,6 +7,7 @@
 
 use sqlx::{SqliteConnection, SqlitePool};
 
+use crate::domains::InsertOutcome;
 use crate::domains::attachment::{self, NewAttachment};
 use crate::shared::result::Result;
 
@@ -27,22 +28,13 @@ pub struct NewMessage {
     pub text: Option<String>,
 }
 
-/// What [`insert`] did with a row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InsertOutcome {
-    /// The row was written.
-    Stored,
-    /// The row was already there, so the redelivery was ignored.
-    Duplicate,
-}
-
 /// What [`MessageRepository::store`] wrote.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StoreOutcome {
     /// What happened to the `messages` row.
     pub message: InsertOutcome,
     /// What happened to the `attachments` row, when the message carried media.
-    pub attachment: Option<attachment::InsertOutcome>,
+    pub attachment: Option<InsertOutcome>,
 }
 
 /// Writes an arriving message and its attachment together.
@@ -273,7 +265,7 @@ mod tests {
             outcome,
             StoreOutcome {
                 message: InsertOutcome::Stored,
-                attachment: Some(attachment::InsertOutcome::Stored),
+                attachment: Some(InsertOutcome::Stored),
             }
         );
         assert_eq!(count(&repository, "messages").await, 1);
@@ -317,14 +309,14 @@ mod tests {
             first,
             StoreOutcome {
                 message: InsertOutcome::Stored,
-                attachment: Some(attachment::InsertOutcome::Stored),
+                attachment: Some(InsertOutcome::Stored),
             }
         );
         assert_eq!(
             second,
             StoreOutcome {
                 message: InsertOutcome::Duplicate,
-                attachment: Some(attachment::InsertOutcome::Duplicate),
+                attachment: Some(InsertOutcome::Duplicate),
             }
         );
         assert_eq!(count(&repository, "messages").await, 1);
@@ -429,7 +421,7 @@ mod tests {
             outcome,
             StoreOutcome {
                 message: InsertOutcome::Duplicate,
-                attachment: Some(attachment::InsertOutcome::Stored),
+                attachment: Some(InsertOutcome::Stored),
             }
         );
 

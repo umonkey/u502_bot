@@ -11,6 +11,7 @@
 
 use sqlx::{Row, SqliteConnection, SqlitePool};
 
+use crate::domains::InsertOutcome;
 use crate::shared::result::Result;
 
 /// The media family an attachment belongs to.
@@ -83,15 +84,6 @@ pub struct PendingAttachment {
     pub mime_type: Option<String>,
     /// Media size in bytes, when Telegram reported one.
     pub file_size: Option<i64>,
-}
-
-/// What an attachment insert did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InsertOutcome {
-    /// The row was written.
-    Stored,
-    /// The row was already there, so the redelivery was ignored.
-    Duplicate,
 }
 
 /// Writes attachments to the `attachments` table.

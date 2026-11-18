@@ -17,8 +17,6 @@
 //! to a third party. An empty one transcribes nothing and the skip warnings publish the chat ids an
 //! operator needs before the list is known.
 
-use std::time::Duration;
-
 use crate::domains::attachment::{AttachmentKind, AttachmentRepository, PendingAttachment};
 use crate::domains::outbox::{EnqueueOutcome, NewOutboxMessage, OutboxRepository};
 use crate::infra::config::Whitelist;
@@ -27,18 +25,15 @@ use crate::infra::openrouter::{AudioFormat, OpenRouter};
 use crate::infra::sentry;
 use crate::infra::telegram_bot::Telegram;
 use crate::services::shutdown::Shutdown;
-use crate::services::unix_now;
 use crate::services::wake::Wake;
-use crate::shared::result::Error;
+use crate::services::{BATCH, IDLE, unix_now};
+use crate::shared::result::{Error, Result};
 
 /// Plain-text header placed above the transcript in the first reply.
 const REPLY_HEADER: &str = "Расшифровка:";
 
 /// Only messages at most this old are transcribed, which bounds cost and retries.
 const WINDOW_SECONDS: i64 = 3_600;
-
-/// Attachments read per scan.
-const BATCH: i64 = 10;
 
 /// The Bot API refuses `getFile` above 20 MB, so a larger attachment can never be downloaded; it is
 /// skipped and marked processed instead of failing once per scan for the length of the window.
@@ -49,9 +44,6 @@ const MAX_DOWNLOAD_BYTES: i64 = 20 * 1024 * 1024;
 /// It marks pickup before the download and the model call, which are the slow part, so a chat can
 /// tell a queued attachment from one the bot never saw.
 const PROCESSING_REACTION: &str = "👀";
-
-/// Pause after a scan that found nothing, or that could not do any work.
-const IDLE: Duration = Duration::from_secs(5);
 
 /// Maximum visible characters per outbox row: Telegram rejects a message longer than 4096.
 ///
@@ -289,31 +281,8 @@ impl Transcriber {
             ) => result,
             () = shutdown.wait() => return false,
         };
-        let transcript = match transcribed {
-            Ok(transcript) => transcript,
-            Err(error) => match &error {
-                Error::AudioTooLarge { bytes, max } => {
-                    tracing::warn!(
-                        attachment_id = attachment.id,
-                        chat_id = attachment.chat_id,
-                        message_id = attachment.message_id,
-                        kind = attachment.kind.as_str(),
-                        bytes,
-                        max,
-                        "Skipped an attachment: its audio is above the transcription input limit"
-                    );
 
-                    return self.mark_processed(attachment).await;
-                }
-                _ => {
-                    log_failure(attachment, &error);
-
-                    return false;
-                }
-            },
-        };
-
-        self.finish(attachment, &transcript, now).await
+        self.handle_transcript(attachment, transcribed, now).await
     }
 
     /// Transcribes a video attachment by extracting its audio track first.
@@ -395,6 +364,20 @@ impl Transcriber {
             result = self.openrouter.transcribe_audio(&audio, AudioFormat::Ogg) => result,
             () = shutdown.wait() => return false,
         };
+
+        self.handle_transcript(attachment, transcribed, now).await
+    }
+
+    /// Queues a transcript, or finishes an attachment whose model call a retry could not change.
+    ///
+    /// Audio above the client's input limit is skipped and marked processed, because the next scan
+    /// would pay for the same request again; any other failure stays pending for the next scan.
+    async fn handle_transcript(
+        &self,
+        attachment: &PendingAttachment,
+        transcribed: Result<String>,
+        now: i64,
+    ) -> bool {
         let transcript = match transcribed {
             Ok(transcript) => transcript,
             Err(error) => match &error {

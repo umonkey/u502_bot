@@ -10,13 +10,19 @@
 //! can ask every loop to end without knowing how any of them is written, and [`wake::Wake`], the
 //! one-way pulse a service sends a peer when it creates work, so an idle pause ends at once.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub mod ingestor;
 pub mod outbox;
 pub mod shutdown;
 pub mod transcriber;
 pub mod wake;
+
+/// Work items one scan reads, whether pending attachments or outbox rows.
+pub(crate) const BATCH: i64 = 10;
+
+/// Pause after a scan that found no work, or could not do any, before retrying.
+pub(crate) const IDLE: Duration = Duration::from_secs(5);
 
 /// Current Unix time in seconds, UTC, which is how the schema stores every timestamp.
 pub(crate) fn unix_now() -> i64 {

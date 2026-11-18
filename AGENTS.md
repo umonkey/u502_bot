@@ -39,7 +39,7 @@ Running `make` without a target executes `check`.
 - `src/main.rs`: entry point; calls `cli::run()`.
 - `src/cli/mod.rs`: defines the clap `Command` enum, parses arguments, and routes each variant.
 - `src/cli/<command>.rs`: one module per subcommand; `src/cli/start.rs` composes the clients, the repositories, and the services.
-- `src/domains.rs`: declares the domain modules.
+- `src/domains.rs`: declares the domain modules and `InsertOutcome`, the answer both idempotent inserts share.
 - `src/domains/attachment.rs`: the attachment model and the repository that owns the `attachments` SQL, including the pending scan and the processed flag.
 - `src/domains/message.rs`: the message model and the repository that owns the `messages` SQL and the one transaction that also writes a message's attachment.
 - `src/domains/outbox.rs`: the outbox model and the repository that owns the `outbox` SQL.
@@ -51,7 +51,7 @@ Running `make` without a target executes `check`.
 - `src/infra/sentry.rs`: `init`, which takes the DSN as a value and installs the `tracing` subscriber, the optional Sentry client, an error layer, and a crate-scoped structured-log layer, and the metric functions for messages, attachments, the outbox, OpenRouter, and ffmpeg.
 - `src/infra/signal.rs`: `Signal` and `wait`; the listener for `SIGINT` and, on Unix, `SIGTERM`.
 - `src/infra/telegram_bot.rs`: `Telegram` and `Messages`, the Telegram client; it receives, downloads, reacts, and sends, and knows nothing about storage.
-- `src/services.rs`: declares the long-running services, the shutdown flag they share, and the shared time helpers.
+- `src/services.rs`: declares the long-running services, the shutdown flag they share, the shared time helpers, the idle pause, and the batch size.
 - `src/services/shutdown.rs`: `Shutdown`, the sticky cooperative flag that stops every service on one request.
 - `src/services/wake.rs`: `Wake`, the pulse a service sends another when it creates work, which ends the receiver's idle pause early.
 - `src/services/ingestor.rs`: the message loop; it stores every delivered message and its attachment metadata, drains what the dispatcher already queued, then stops polling.
@@ -60,6 +60,7 @@ Running `make` without a target executes `check`.
 - `src/shared.rs` / `src/shared/result.rs`: the crate-wide `Error` enum, with one variant per failure mode the bot can produce, and the `Result<T>` alias every fallible function returns; any layer may use them.
 - `src/shared/config.rs`: `VariableName`, the enum naming every environment variable, and `SentryDsn`, the destination or the reason reporting is off; resolution stays in `src/infra/config.rs`.
 - `src/shared/metrics.rs`: `MetricName`, the enum naming every application metric the bot records, with the exact Sentry wire name behind `as_str`; recording stays in `src/infra/sentry.rs`, which owns the client.
+- `src/shared/text.rs`: `truncate` and `MAX_ERROR_BODY`, the one policy for how much of an external error body reaches the logs; the OpenRouter and ffmpeg clients use it.
 - `dev/schema.sql`: initial SQLite schema, embedded at build time and applied on every startup.
 
 Add every new subcommand as a variant of the `Command` enum in `src/cli/mod.rs`, route it from `run()`, and implement it in `src/cli/<command>.rs`.
