@@ -20,7 +20,14 @@ Each variable resolves the same way: `<NAME>_FILE` is consulted first, and its c
 | `TRANSCRIBE_MODEL_NAME` | no       | `google/gemini-3.5-transcribe`   | Speech-to-Text model id; see [transcription](../transcription/README.md)                    |
 | `RUST_LOG`              | no       | `info`                           | console filter only, with no `_FILE` form; see [observability](../observability/README.md)  |
 
-## Required versus optional
+## Failure policy
+
+The bot resolves every variable once at startup and applies one policy to all of them:
+
+- A required value that is absent or blank fails startup.
+- An optional value that is absent or blank uses its default: an empty chat list transcribes nothing, and an unset model uses the compiled-in one.
+- A value that is present but unusable — an unreadable or non-UTF-8 file, a non-Unicode variable, a non-numeric chat id — fails startup, whether the variable is required or optional.
+- `SENTRY_DSN` is the one exception: a missing, blank, unreadable, or invalid DSN only logs one warning and disables reporting, so observability never keeps the bot from running; see [observability](../observability/README.md).
 
 The bot refuses to start when a required value is missing. The OpenRouter key is required because an unconfigured client would fail every transcription with an authentication error while the process looked healthy. An empty `openrouter_api_key` file is not an opt-out, unlike an empty `sentry_dsn` file, because an empty value counts as a missing key.
 
@@ -30,8 +37,9 @@ Prefer the file form for the bot token, the OpenRouter key, and the Sentry DSN: 
 
 ## Startup failures
 
-A missing required value, an unreadable or non-UTF-8 configuration file, and a non-numeric entry in `TRANSCRIBE_CHATS` each fail startup with an error naming the variable or the path, so the supervisor restarts the process and the log shows why.
+A missing required value, an unreadable or non-UTF-8 configuration file, and a non-numeric entry in `TRANSCRIBE_CHATS` each fail startup with an error naming the variable or the path, so the supervisor restarts the process and the log shows why. The file case covers optional variables too: a broken `TRANSCRIBE_MODEL_NAME_FILE` fails startup rather than falling back to the default, and only an absent or blank optional value takes its default. A configuration failure that happens before logging is set up is still reported to Sentry when the DSN is usable.
 
 ## Further reading
 
 - [ADR 0002: read configuration from the environment or a file](../../adr/0002-secret-configuration.md)
+- [ADR 0014: resolve configuration into a typed Settings](../../adr/0014-typed-settings.md)

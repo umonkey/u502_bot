@@ -5,14 +5,12 @@
 //! so repositories live in `src/domains/` and domain semantics stay outside this module. The startup
 //! schema is embedded at build time in [`SCHEMA`]; nothing is read from disk at runtime.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 use sqlx::{Sqlite, pool::PoolOptions};
 
-use crate::infra::config::require_secret;
-use crate::shared::config::VariableName;
 use crate::shared::result::{Error, Result};
 
 /// Startup schema, baked into the binary at build time.
@@ -20,20 +18,6 @@ use crate::shared::result::{Error, Result};
 /// `dev/schema.sql` remains the authored source; the relative path resolves from this file, so a
 /// schema edit requires a rebuild. [`Database::apply_schema`] applies it on every startup.
 pub const SCHEMA: &str = include_str!("../../dev/schema.sql");
-
-/// Resolves the database file path from the environment.
-///
-/// The path is required, so this uses [`require_secret`]: an unset or blank
-/// [`VariableName::DatabasePath`] is an [`Error::MissingVariable`], a value that is not valid
-/// Unicode is an [`Error::VariableNotUnicode`], and a `DATABASE_PATH_FILE` that cannot be read, or is
-/// not UTF-8, is an [`Error::ReadConfiguration`].
-pub fn database_path() -> Result<PathBuf> {
-    resolve_database_path(require_secret)
-}
-
-fn resolve_database_path(lookup: impl Fn(VariableName) -> Result<String>) -> Result<PathBuf> {
-    lookup(VariableName::DatabasePath).map(PathBuf::from)
-}
 
 /// A pooled SQLite connection shared with the repositories that own their SQL.
 pub struct Database {
@@ -149,31 +133,6 @@ mod tests {
     #[tokio::test]
     async fn schema_contains_the_attachments_table() {
         assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS attachments"));
-    }
-
-    #[tokio::test]
-    async fn missing_database_path_is_an_error() {
-        let error = resolve_database_path(|_| {
-            Err(Error::MissingVariable(
-                VariableName::DatabasePath.to_string(),
-            ))
-        })
-        .expect_err("missing database path should not resolve");
-        assert!(
-            matches!(&error, Error::MissingVariable(name) if name == VariableName::DatabasePath.as_str())
-        );
-        assert!(
-            error
-                .to_string()
-                .contains(VariableName::DatabasePath.as_str())
-        );
-    }
-
-    #[tokio::test]
-    async fn configured_database_path_is_used_verbatim() {
-        let path = resolve_database_path(|_| Ok("/tmp/u502.sqlite".to_owned()))
-            .expect("configured database path should resolve");
-        assert_eq!(path, PathBuf::from("/tmp/u502.sqlite"));
     }
 
     #[tokio::test]

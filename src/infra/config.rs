@@ -11,32 +11,128 @@
 //!    unreadable file, or one that is not UTF-8, as [`Error::ReadConfiguration`], instead of being
 //!    silently treated as absent.
 //!
-//! `Ok(None)` means the variable is not configured, and the caller decides whether that is fatal,
-//! a default, or a disable; only [`require_secret`] treats absence as an error. `RUST_LOG` is the one
-//! exception: `tracing_subscriber`'s `EnvFilter` reads it, not this crate, and it has no file form.
+//! `Ok(None)` means the variable is not configured. This module is also the only place the
+//! environment is read: [`Settings::load`] resolves everything once, and absence is fatal only for
+//! the fields startup cannot run without. `RUST_LOG` is the one exception: `tracing_subscriber`'s
+//! `EnvFilter` reads it, not this crate, and it has no file form.
 
+use std::collections::HashSet;
 use std::env::VarError;
 use std::io;
 use std::path::PathBuf;
 
-use crate::shared::config::VariableName;
+use crate::shared::config::{SentryDsn, VariableName};
 use crate::shared::result::{Error, Result};
+
+/// Model used when [`VariableName::TranscribeModelName`] is unset or empty.
+pub const DEFAULT_TRANSCRIBE_MODEL: &str = "google/gemini-3.5-transcribe";
+
+/// Everything the bot reads from the environment, resolved and validated once.
+///
+/// Holds secrets: it deliberately implements no `Debug`, `Display`, or `Clone`.
+pub struct Settings {
+    pub telegram_api_token: String,
+    pub openrouter_api_key: String,
+    pub transcribe_model: String,
+    pub transcribe_chats: Whitelist,
+    pub database_path: PathBuf,
+    pub sentry_dsn: SentryDsn,
+}
+
+impl Settings {
+    /// Resolves every setting; the only place the environment is read.
+    pub fn load() -> Result<Self> {
+        Self::from_lookup(get_optional)
+    }
+
+    fn from_lookup(lookup: impl Fn(VariableName) -> Result<Option<String>>) -> Result<Self> {
+        let database_path = required(&lookup, VariableName::DatabasePath)?.into();
+        Ok(Self {
+            telegram_api_token: required(&lookup, VariableName::TelegramApiToken)?,
+            openrouter_api_key: required(&lookup, VariableName::OpenRouterApiKey)?,
+            transcribe_model: lookup(VariableName::TranscribeModelName)?
+                .unwrap_or_else(|| DEFAULT_TRANSCRIBE_MODEL.to_owned()),
+            transcribe_chats: lookup(VariableName::TranscribeChats)?
+                .map_or_else(|| Ok(Whitelist::default()), |raw| Whitelist::parse(&raw))?,
+            database_path,
+            sentry_dsn: classify_dsn(lookup(VariableName::SentryDsn)),
+        })
+    }
+}
+
+/// Resolves the DSN without failing: ADR 0004 keeps observability from stopping the bot.
+pub fn sentry_dsn() -> SentryDsn {
+    classify_dsn(get_optional(VariableName::SentryDsn))
+}
+
+/// Turns a DSN resolution into a destination or the reason reporting is off.
+fn classify_dsn(value: Result<Option<String>>) -> SentryDsn {
+    match value {
+        Ok(Some(raw)) => SentryDsn::Configured(raw),
+        Ok(None) => SentryDsn::Disabled(format!("{} is not set", VariableName::SentryDsn)),
+        Err(error) => SentryDsn::Disabled(format!("{}: {error}", VariableName::SentryDsn)),
+    }
+}
+
+/// Resolves a setting startup cannot run without.
+fn required(
+    lookup: &impl Fn(VariableName) -> Result<Option<String>>,
+    name: VariableName,
+) -> Result<String> {
+    lookup(name)?.ok_or_else(|| Error::MissingVariable(name.as_str().to_owned()))
+}
+
+/// The chats whose audio and video are transcribed.
+///
+/// Membership is a configuration decision, not data, so the check happens after the scan: a chat
+/// that is not listed is logged once and marked processed. An empty whitelist is allowed and
+/// transcribes nothing, which is how an operator discovers the chat ids from the skip warnings.
+#[derive(Default)]
+pub struct Whitelist(HashSet<i64>);
+
+impl Whitelist {
+    /// Parses a comma-separated list of numeric chat ids.
+    ///
+    /// Entries are trimmed, empty entries are ignored, and duplicates collapse. An empty list is
+    /// valid and means "transcribe nothing": the bot still runs, so the skip warnings can publish
+    /// the chat ids before the list is known. A non-numeric entry is an error, so a typo cannot
+    /// silently narrow the list.
+    pub fn parse(raw: &str) -> Result<Self> {
+        let mut chats = HashSet::new();
+
+        for token in raw.split(',') {
+            let token = token.trim();
+            if token.is_empty() {
+                continue;
+            }
+
+            let chat_id = token
+                .parse()
+                .map_err(|_| Error::InvalidChatId(token.to_owned()))?;
+            chats.insert(chat_id);
+        }
+
+        Ok(Self(chats))
+    }
+
+    /// Returns whether `chat_id` may be transcribed.
+    pub fn contains(&self, chat_id: i64) -> bool {
+        self.0.contains(&chat_id)
+    }
+
+    /// Returns whether no chat is white-listed, in which case every attachment is skipped.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
 
 /// Resolves one environment variable.
 ///
 /// `Ok(None)` means the variable is not configured. `Err` means a value is present but unusable:
 /// a non-Unicode variable, or a `NAME_FILE` path that cannot be read or is not UTF-8. See the
 /// module documentation for the precedence and the trimming rule.
-pub fn get_optional(name: VariableName) -> Result<Option<String>> {
+fn get_optional(name: VariableName) -> Result<Option<String>> {
     resolve(name.as_str(), |key| std::env::var(key), read_file)
-}
-
-/// Resolves a secret that startup cannot run without.
-///
-/// This is the only resolver that treats absence as an error, and it is what a caller uses instead
-/// of checking [`get_optional`] for `None`.
-pub fn require_secret(name: VariableName) -> Result<String> {
-    get_optional(name)?.ok_or_else(|| Error::MissingVariable(name.as_str().to_owned()))
 }
 
 /// The one algorithm behind [`get_optional`], with the lookups injected so tests need not touch the
@@ -82,6 +178,224 @@ mod tests {
     use std::ffi::OsString;
 
     use super::*;
+
+    fn required_values() -> Vec<(VariableName, &'static str)> {
+        vec![
+            (VariableName::TelegramApiToken, "token"),
+            (VariableName::OpenRouterApiKey, "key"),
+            (VariableName::DatabasePath, "/tmp/u502.sqlite"),
+        ]
+    }
+
+    fn settings(values: &[(VariableName, &str)]) -> Result<Settings> {
+        Settings::from_lookup(|name| {
+            Ok(values
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_owned()))
+        })
+    }
+
+    fn settings_error(values: &[(VariableName, &str)]) -> Error {
+        match settings(values) {
+            Ok(_) => panic!("the settings should not load"),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn required_values_are_loaded() {
+        let mut values = required_values();
+        values.extend([
+            (VariableName::TranscribeModelName, "openai/whisper-1"),
+            (VariableName::TranscribeChats, "1,2"),
+        ]);
+
+        let settings = settings(&values).expect("required values should load");
+
+        assert_eq!(settings.telegram_api_token, "token");
+        assert_eq!(settings.openrouter_api_key, "key");
+        assert_eq!(settings.transcribe_model, "openai/whisper-1");
+        assert_eq!(settings.database_path, PathBuf::from("/tmp/u502.sqlite"));
+        assert!(settings.transcribe_chats.contains(1));
+        assert!(settings.transcribe_chats.contains(2));
+        assert!(matches!(&settings.sentry_dsn, SentryDsn::Disabled(_)));
+    }
+
+    #[test]
+    fn missing_token_fails() {
+        let values = [
+            (VariableName::OpenRouterApiKey, "key"),
+            (VariableName::DatabasePath, "/tmp/u502.sqlite"),
+        ];
+
+        assert!(matches!(
+            settings_error(&values),
+            Error::MissingVariable(name) if name == "TELEGRAM_API_TOKEN"
+        ));
+    }
+
+    #[test]
+    fn missing_openrouter_key_fails() {
+        let values = [
+            (VariableName::TelegramApiToken, "token"),
+            (VariableName::DatabasePath, "/tmp/u502.sqlite"),
+        ];
+
+        assert!(matches!(
+            settings_error(&values),
+            Error::MissingVariable(name) if name == "OPENROUTER_API_KEY"
+        ));
+    }
+
+    #[test]
+    fn missing_database_path_fails() {
+        let values = [
+            (VariableName::TelegramApiToken, "token"),
+            (VariableName::OpenRouterApiKey, "key"),
+        ];
+
+        assert!(matches!(
+            settings_error(&values),
+            Error::MissingVariable(name) if name == "DATABASE_PATH"
+        ));
+    }
+
+    #[test]
+    fn a_configured_chat_list_is_parsed() {
+        let mut values = required_values();
+        values.push((VariableName::TranscribeChats, " 1 , 2 ,3 "));
+
+        let settings = settings(&values).expect("a chat list should parse");
+
+        assert!(settings.transcribe_chats.contains(1));
+        assert!(settings.transcribe_chats.contains(2));
+        assert!(settings.transcribe_chats.contains(3));
+        assert!(!settings.transcribe_chats.contains(4));
+    }
+
+    #[test]
+    fn a_malformed_chat_list_fails() {
+        let mut values = required_values();
+        values.push((VariableName::TranscribeChats, "1,two,3"));
+
+        match settings_error(&values) {
+            Error::InvalidChatId(token) => assert_eq!(token, "two"),
+            other => panic!("expected a non-numeric entry, got {other}"),
+        }
+    }
+
+    #[test]
+    fn an_unusable_optional_value_fails() {
+        let error = match Settings::from_lookup(|name| {
+            if name == VariableName::TranscribeModelName {
+                Err(Error::VariableNotUnicode(name.as_str().to_owned()))
+            } else {
+                Ok(Some("value".to_owned()))
+            }
+        }) {
+            Ok(_) => panic!("an unusable optional value should fail"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            Error::VariableNotUnicode(name) if name == "TRANSCRIBE_MODEL_NAME"
+        ));
+    }
+
+    #[test]
+    fn unset_model_resolves_to_the_default() {
+        let settings = settings(&required_values()).expect("required values should load");
+
+        assert_eq!(settings.transcribe_model, DEFAULT_TRANSCRIBE_MODEL);
+    }
+
+    #[test]
+    fn configured_model_is_kept_verbatim() {
+        let mut values = required_values();
+        values.push((VariableName::TranscribeModelName, "openai/whisper-1"));
+
+        let settings = settings(&values).expect("a configured model should load");
+
+        assert_eq!(settings.transcribe_model, "openai/whisper-1");
+    }
+
+    #[test]
+    fn a_configured_dsn_is_a_destination() {
+        let dsn = classify_dsn(Ok(Some("https://public@example.com/1".to_owned())));
+
+        assert!(matches!(dsn, SentryDsn::Configured(_)));
+    }
+
+    #[test]
+    fn an_absent_dsn_is_disabled_with_the_variable_name() {
+        match classify_dsn(Ok(None)) {
+            SentryDsn::Disabled(reason) => {
+                assert!(reason.contains("SENTRY_DSN"), "reason {reason}")
+            }
+            SentryDsn::Configured(_) => panic!("an absent DSN should disable reporting"),
+        }
+    }
+
+    #[test]
+    fn an_unusable_dsn_is_disabled_with_the_error() {
+        let error = Error::ReadConfiguration {
+            path: PathBuf::from("/run/secrets/sentry_dsn"),
+            source: io::Error::new(io::ErrorKind::NotFound, "no such file"),
+        };
+        let expected = format!("SENTRY_DSN: {error}");
+
+        match classify_dsn(Err(error)) {
+            SentryDsn::Disabled(reason) => assert_eq!(reason, expected),
+            SentryDsn::Configured(_) => panic!("an unusable DSN should disable reporting"),
+        }
+    }
+
+    #[test]
+    fn whitelist_parses_trimmed_and_spaced_ids() {
+        let whitelist = Whitelist::parse(" 1 , 2 ,3 ").expect("a spaced list should parse");
+
+        assert!(whitelist.contains(1));
+        assert!(whitelist.contains(2));
+        assert!(whitelist.contains(3));
+        assert!(!whitelist.contains(4));
+    }
+
+    #[test]
+    fn whitelist_collapses_duplicates_and_trailing_commas() {
+        let whitelist = Whitelist::parse("1,1,2,").expect("duplicates should parse");
+
+        assert!(whitelist.contains(1));
+        assert!(whitelist.contains(2));
+    }
+
+    #[test]
+    fn whitelist_allows_an_empty_list() {
+        for raw in ["", "   ", ",", " , "] {
+            let whitelist = Whitelist::parse(raw).expect("an empty list should parse");
+
+            assert!(whitelist.is_empty(), "raw {raw:?}");
+            assert!(!whitelist.contains(1));
+        }
+    }
+
+    #[test]
+    fn whitelist_rejects_a_non_numeric_entry() {
+        match Whitelist::parse("1,two,3") {
+            Err(Error::InvalidChatId(token)) => assert_eq!(token, "two"),
+            Err(other) => panic!("expected a non-numeric entry, got {other}"),
+            Ok(_) => panic!("expected a non-numeric entry"),
+        }
+    }
+
+    #[test]
+    fn a_default_whitelist_is_empty() {
+        let whitelist = Whitelist::default();
+
+        assert!(whitelist.is_empty());
+        assert!(!whitelist.contains(1));
+    }
 
     #[test]
     fn missing_error_names_both_forms() {

@@ -8,7 +8,7 @@ The bot writes structured logs and, when a Sentry DSN is configured, reports err
 
 ## Sentry
 
-Sentry is optional. A missing, blank, or invalid DSN logs one warning and the bot runs without reporting. The DSN resolves from `SENTRY_DSN_FILE` first and `SENTRY_DSN` second, like every other variable; see [configuration](../configuration/README.md).
+Sentry is optional. A missing, blank, or invalid DSN, and an unreadable `SENTRY_DSN_FILE`, each log one warning and the bot runs without reporting. The DSN resolves from `SENTRY_DSN_FILE` first and `SENTRY_DSN` second, like every other variable; see [configuration](../configuration/README.md).
 
 ## Issues and logs
 

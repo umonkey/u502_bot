@@ -1,10 +1,10 @@
 //! Error reporting, application logs, and metrics through Sentry.
 //!
-//! [`init`] installs the global `tracing` subscriber and, when [`VariableName::SentryDsn`] resolves
-//! to a valid DSN, a Sentry client. A missing, empty, or invalid DSN only logs a warning:
-//! observability must never keep the bot from running. Every `ERROR` event and every panic becomes
-//! an issue, and every `INFO`-or-higher event from this crate becomes a structured log, so those
-//! logs include the message content the command layer records.
+//! [`init`] installs the global `tracing` subscriber and, when the caller supplies a
+//! [`SentryDsn::Configured`] destination that parses, a Sentry client. [`SentryDsn::Disabled`] only
+//! logs the reason it carries: observability must never keep the bot from running. Every `ERROR`
+//! event and every panic becomes an issue, and every `INFO`-or-higher event from this crate becomes
+//! a structured log, so those logs include the message content the command layer records.
 //!
 //! The metric functions in this module are the only place metrics are recorded. Their names come
 //! from [`MetricName`], so the complete vocabulary lives in one place. They carry no attributes: a
@@ -19,8 +19,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{Layer, filter::EnvFilter};
 
-use crate::infra::config::get_optional;
-use crate::shared::config::VariableName;
+use crate::shared::config::{SentryDsn, VariableName};
 use crate::shared::metrics::MetricName;
 
 /// Log level forwarded to Sentry. Fixed so `RUST_LOG` stays a console-only control.
@@ -30,16 +29,24 @@ const SENTRY_LOG_LEVEL: LevelFilter = LevelFilter::INFO;
 ///
 /// The returned guard must be bound for the lifetime of the process; dropping it flushes queued
 /// events. `None` means Sentry is disabled.
-pub fn init() -> Option<sentry::ClientInitGuard> {
-    let resolved = resolve_dsn();
-    let guard = match &resolved {
-        Ok(dsn) => {
-            let mut options = sentry::ClientOptions::new();
-            options.dsn = Some(dsn.clone());
-            options.release = sentry::release_name!();
-            Some(sentry::init(options))
-        }
-        Err(_) => None,
+pub fn init(dsn: &SentryDsn) -> Option<sentry::ClientInitGuard> {
+    let (guard, disabled) = match dsn {
+        SentryDsn::Configured(raw) => match parse_dsn(raw) {
+            Ok(parsed) => {
+                let mut options = sentry::ClientOptions::new();
+                options.dsn = Some(parsed);
+                options.release = sentry::release_name!();
+                (Some(sentry::init(options)), None)
+            }
+            Err(error) => (
+                None,
+                Some(format!(
+                    "{} is not a valid DSN: {error}",
+                    VariableName::SentryDsn
+                )),
+            ),
+        },
+        SentryDsn::Disabled(reason) => (None, Some(reason.clone())),
     };
 
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
@@ -58,9 +65,9 @@ pub fn init() -> Option<sentry::ClientInitGuard> {
         }))
         .init();
 
-    match resolved {
-        Ok(_) => tracing::info!("Sentry reporting is enabled"),
-        Err(reason) => tracing::warn!(%reason, "Sentry reporting is disabled"),
+    match disabled {
+        Some(reason) => tracing::warn!(reason, "Sentry reporting is disabled"),
+        None => tracing::info!("Sentry reporting is enabled"),
     }
 
     guard
@@ -172,24 +179,10 @@ pub fn ffmpeg_call(duration: Duration) {
     .capture();
 }
 
-/// Reads the DSN, mapping every failure to a reason to disable reporting.
-///
-/// The resolver returns `None` for an absent or blank DSN, which is the documented opt-out; an
-/// unusable file or non-Unicode value is reported as a reason instead.
-fn resolve_dsn() -> Result<sentry::types::Dsn, String> {
-    let name = VariableName::SentryDsn;
-    match get_optional(name) {
-        Ok(Some(raw)) => {
-            parse_dsn(&raw).map_err(|error| format!("{name} is not a valid DSN: {error}"))
-        }
-        Ok(None) => Err(format!("{name} is not set")),
-        Err(error) => Err(format!("{name} is not set: {error}")),
-    }
-}
-
 /// Parses a raw DSN.
 ///
-/// The resolver already trims and rejects blank values, so a blank DSN never reaches this point.
+/// A blank value never arrives from the resolver: it counts as unset, so the caller receives
+/// [`SentryDsn::Disabled`] instead. A blank string still fails to parse.
 fn parse_dsn(raw: &str) -> Result<sentry::types::Dsn, sentry::types::ParseDsnError> {
     raw.parse()
 }
@@ -227,7 +220,7 @@ mod tests {
     #[test]
     fn blank_dsn_is_not_a_valid_dsn() {
         // Opting out happens one layer up: the resolver reports a blank value as unset, so it
-        // arrives here as `Ok(None)` and never as an empty string.
+        // arrives here as `SentryDsn::Disabled`. A blank string still fails to parse.
         for raw in ["", "  \n"] {
             assert!(parse_dsn(raw).is_err(), "raw {raw:?}");
         }

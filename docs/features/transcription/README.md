@@ -37,7 +37,7 @@ The delay between a source message's Telegram send time and the moment Telegram 
 
 ## Model selection
 
-The default model is `google/gemini-3.5-transcribe`. `TRANSCRIBE_MODEL_NAME` overrides it, and an empty value falls back to the default. Startup logs `Using model <id> to transcribe; override with TRANSCRIBE_MODEL_NAME` once, so the model that spends the credits is visible in the console and in Sentry's structured logs.
+The default model is `google/gemini-3.5-transcribe`. `TRANSCRIBE_MODEL_NAME` overrides it, and an empty value falls back to the default; a configured but unreadable value, such as a broken `TRANSCRIBE_MODEL_NAME_FILE`, fails startup. Startup logs `Using model <id> to transcribe; override with TRANSCRIBE_MODEL_NAME` once, so the model that spends the credits is visible in the console and in Sentry's structured logs.
 
 Speech-to-Text models are a separate catalogue from the chat models, so an override must name a transcription model. `GET https://openrouter.ai/api/v1/models?output_modalities=transcription` lists them.
 

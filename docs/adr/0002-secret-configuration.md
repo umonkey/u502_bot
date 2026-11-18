@@ -3,6 +3,7 @@
 - Status: accepted
 - Date: 2026-11-17
 - Amended: 2026-11-18, so the direct-or-file rule covers every configuration variable, not only secrets; the ffmpeg binary was dropped from the configuration surface because the program is now resolved through `PATH`, and an unresolvable optional model id falls back to its default
+- Amended: 2026-11-18, so resolution happens once into a typed Settings; see ADR 0014.
 
 ## Context
 
@@ -24,13 +25,11 @@ is trimmed of surrounding whitespace, and a value that is blank after trimming c
 Values are UTF-8. A non-Unicode variable, an unreadable file, and a file that is not UTF-8 are typed
 errors that name the variable or the path, never a panic and never an empty value.
 
-`VariableName` names every variable, `get_optional` is the resolver, and
-`require_secret` turns absence into an error for the variables startup cannot run without, so a
-missing required value exits non-zero and the supervisor restarts the process. No secret value is
-logged.
+`VariableName` names every variable; `Settings::load` decides once which variables startup cannot run
+without, so a missing required value exits non-zero and the supervisor restarts the process. No secret
+value is logged.
 
-`require_secret` is the required-value resolver; it also guards `DATABASE_PATH`, which is not a
-secret.
+`DATABASE_PATH` is required too, even though it is not a secret.
 
 `RUST_LOG` is the exception: `tracing_subscriber`'s `EnvFilter` reads it, not this crate, so it has no
 file form.
@@ -40,8 +39,9 @@ file form.
 - one resolver, one trim, one interpretation of blank, and one error type serve every variable; the
   same binary works with exported values and mounted files, with no extra tooling
 - a secret never reaches the logs, and a missing required value fails loudly at startup
-- an optional value that cannot be resolved falls back only where the caller supplies a default: the
-  transcription model logs one warning and uses the compiled-in default
+- an optional value that is absent or blank falls back only where the caller supplies a default: the
+  transcription model uses the compiled-in default, and a value that is present but unreadable fails
+  startup instead
 - any variable can be mounted; a leftover `<NAME>_FILE` in a shared environment overrides the direct
   value for every variable, not only the secrets
 - paths with meaningful surrounding whitespace are no longer representable, so an operator has to

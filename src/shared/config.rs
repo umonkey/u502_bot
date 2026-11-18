@@ -25,6 +25,14 @@ pub enum VariableName {
     TranscribeModelName,
 }
 
+/// What the environment said about Sentry: a destination, or the reason reporting is off.
+pub enum SentryDsn {
+    /// A resolved DSN; the client decides whether it parses.
+    Configured(String),
+    /// No usable destination, with the reason logged once when reporting is set up.
+    Disabled(String),
+}
+
 impl VariableName {
     /// The environment key this name resolves to.
     pub const fn as_str(self) -> &'static str {
@@ -73,5 +81,16 @@ mod tests {
             cases.len(),
             "environment keys should be unique"
         );
+    }
+
+    #[test]
+    fn sentry_dsn_carries_the_reason_it_is_disabled() {
+        let configured = SentryDsn::Configured("https://public@example.com/1".to_owned());
+        assert!(matches!(configured, SentryDsn::Configured(_)));
+
+        match SentryDsn::Disabled("SENTRY_DSN is not set".to_owned()) {
+            SentryDsn::Disabled(reason) => assert_eq!(reason, "SENTRY_DSN is not set"),
+            SentryDsn::Configured(_) => panic!("expected a disabled destination"),
+        }
     }
 }

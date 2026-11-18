@@ -2,60 +2,75 @@
 //!
 //! Everything fallible is resolved before the first task is spawned, so a configuration failure
 //! exits with nothing started: no ingestor, no transcriber, no outbox, and no database write.
+//! Configuration is loaded before the `tracing` subscriber exists, so that failure is reported after
+//! a second best-effort DSN resolution.
 
+use std::path::Path;
 use std::process::ExitCode;
 
 use crate::domains::attachment::AttachmentRepository;
 use crate::domains::message::MessageRepository;
 use crate::domains::outbox::OutboxRepository;
-use crate::infra::config::require_secret;
+use crate::infra::config::{self, Settings};
 use crate::infra::ffmpeg::Ffmpeg;
-use crate::infra::openrouter::{self, OpenRouter};
+use crate::infra::openrouter::OpenRouter;
 use crate::infra::telegram_bot::Telegram;
 use crate::infra::{database, sentry, signal};
 use crate::services::ingestor::Ingestor;
 use crate::services::outbox::Outbox;
 use crate::services::shutdown::Shutdown;
-use crate::services::transcriber::{Transcriber, Whitelist};
+use crate::services::transcriber::Transcriber;
 use crate::services::wake::Wake;
-use crate::shared::config::VariableName;
-use crate::shared::result::Result;
+use crate::shared::result::{Error, Result};
 
 pub async fn run() -> ExitCode {
-    let _sentry_guard = sentry::init();
+    let settings = match Settings::load() {
+        Ok(settings) => settings,
+        Err(error) => return fail_to_load(error),
+    };
+    let _sentry_guard = sentry::init(&settings.sentry_dsn);
     tracing::info!("Starting the Telegram bot.");
 
-    match start().await {
+    match start(settings).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(code) => code,
     }
 }
 
+/// Reports a configuration failure that happened before the subscriber was installed.
+///
+/// The DSN is resolved a second time, on a path that is already exiting, so a usable destination
+/// still receives the failure. `sentry::init` is called once per process: the success path has
+/// already returned when this runs.
+fn fail_to_load(error: Error) -> ExitCode {
+    let _sentry_guard = sentry::init(&config::sentry_dsn());
+    tracing::error!(
+        error = &error as &dyn std::error::Error,
+        "Failed to load the configuration"
+    );
+
+    ExitCode::FAILURE
+}
+
 /// Builds every client and repository, then runs the services until a signal or a service ends them.
-async fn start() -> Result<(), ExitCode> {
+async fn start(settings: Settings) -> Result<(), ExitCode> {
     // Registered first, so a signal that arrives during the slow startup work is remembered by the
     // sticky flag instead of killing the process.
     let shutdown = Shutdown::new();
     let _signals = tokio::spawn(watch_for_shutdown(shutdown.clone()));
 
-    let token = resolve(
-        require_secret(VariableName::TelegramApiToken),
-        "Failed to load TELEGRAM_API_TOKEN",
+    let database = resolve(
+        init_database(&settings.database_path).await,
+        "Failed to open the database",
     )?;
-    let database = resolve(init_database().await, "Failed to open the database")?;
 
-    let openrouter_key = resolve(
-        require_secret(VariableName::OpenRouterApiKey),
-        "Failed to load OPENROUTER_API_KEY",
-    )?;
-    let model = openrouter::model_from_env();
-    let chats = resolve(Whitelist::from_env(), "Failed to load TRANSCRIBE_CHATS")?;
-    if chats.is_empty() {
+    if settings.transcribe_chats.is_empty() {
         tracing::warn!(
             "TRANSCRIBE_CHATS is empty: no chat is transcribed. Audio and video are skipped and each skip logs its chat id, so add the ids you want transcribed to TRANSCRIBE_CHATS."
         );
     }
 
+    let model = &settings.transcribe_model;
     tracing::info!(model = %model, "Using model {model} to transcribe; override with TRANSCRIBE_MODEL_NAME");
 
     let ffmpeg = Ffmpeg::default();
@@ -67,11 +82,11 @@ async fn start() -> Result<(), ExitCode> {
     }
 
     let openrouter = resolve(
-        OpenRouter::new(openrouter_key, model),
+        OpenRouter::new(settings.openrouter_api_key, settings.transcribe_model),
         "Failed to build the OpenRouter client",
     )?;
     let telegram = resolve(
-        Telegram::connect(token).await,
+        Telegram::connect(settings.telegram_api_token).await,
         "Failed to start the Telegram bot",
     )?;
 
@@ -94,7 +109,7 @@ async fn start() -> Result<(), ExitCode> {
         ffmpeg,
         AttachmentRepository::new(pool.clone()),
         OutboxRepository::new(pool.clone()),
-        chats,
+        settings.transcribe_chats,
         pending_attachments,
         pending_replies.clone(),
     );
@@ -129,11 +144,9 @@ async fn watch_for_shutdown(shutdown: Shutdown) {
     shutdown.request();
 }
 
-/// Opens the database named by `DATABASE_PATH` and applies the embedded schema.
-async fn init_database() -> Result<database::Database> {
-    let path = database::database_path()?;
-
-    let database = database::Database::connect(&path).await?;
+/// Opens the database at `path` and applies the embedded schema.
+async fn init_database(path: &Path) -> Result<database::Database> {
+    let database = database::Database::connect(path).await?;
     database.apply_schema().await?;
     tracing::info!("Using database {}", path.display());
 

@@ -20,13 +20,9 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 
-use crate::infra::config::get_optional;
 use crate::infra::sentry;
 use crate::shared::config::VariableName;
 use crate::shared::result::{Error, Result};
-
-/// Model used when [`VariableName::TranscribeModelName`] is unset or empty.
-pub const DEFAULT_TRANSCRIBE_MODEL: &str = "google/gemini-3.5-transcribe";
 
 /// Speech-to-Text endpoint.
 const ENDPOINT: &str = "https://openrouter.ai/api/v1/audio/transcriptions";
@@ -36,33 +32,6 @@ const TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Characters of an error body kept for the logs.
 const MAX_ERROR_BODY: usize = 500;
-
-/// Resolves the transcription model from [`VariableName::TranscribeModelName`].
-///
-/// An absent value falls back to [`DEFAULT_TRANSCRIBE_MODEL`]. A value that cannot be read, such as
-/// a broken `<NAME>_FILE`, logs one warning and falls back the same way.
-pub fn model_from_env() -> String {
-    match get_optional(VariableName::TranscribeModelName) {
-        Ok(model) => resolve_model(model),
-        Err(error) => {
-            tracing::warn!(
-                error = &error as &dyn std::error::Error,
-                variable = %VariableName::TranscribeModelName,
-                "Cannot read the transcription model; falling back to {}",
-                DEFAULT_TRANSCRIBE_MODEL
-            );
-            resolve_model(None)
-        }
-    }
-}
-
-/// Resolves a raw model setting, falling back to [`DEFAULT_TRANSCRIBE_MODEL`] when it is absent.
-///
-/// A configured value is returned verbatim: the resolver already trimmed it and rejected blank
-/// values, so a model id an operator set on purpose is never rewritten.
-fn resolve_model(raw: Option<String>) -> String {
-    raw.unwrap_or_else(|| DEFAULT_TRANSCRIBE_MODEL.to_owned())
-}
 
 /// The container name sent as `input_audio.format`.
 ///
@@ -127,11 +96,11 @@ pub struct OpenRouter {
 }
 
 impl OpenRouter {
-    /// Builds a client with a 120-second request timeout.
+    /// Builds a client with a 120-second request timeout, using the key and the model the
+    /// composition root resolved.
     ///
-    /// Returns [`Error::EmptyConfiguration`] when the key or the model is empty after trimming, so a
-    /// directly constructed client cannot send a request that is doomed to a 401. Configured values
-    /// never arrive blank: the resolver trims them and treats blank as missing.
+    /// Returns [`Error::EmptyConfiguration`] when either value is empty after trimming. Direct
+    /// construction is the only way to reach that guard: configured values never arrive blank.
     pub fn new(api_key: String, model: String) -> Result<Self> {
         if api_key.trim().is_empty() {
             return Err(Error::EmptyConfiguration(VariableName::OpenRouterApiKey));
@@ -310,23 +279,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unset_model_resolves_to_the_default() {
-        assert_eq!(resolve_model(None), DEFAULT_TRANSCRIBE_MODEL);
-    }
-
-    #[test]
-    fn configured_model_is_kept_verbatim() {
-        assert_eq!(
-            resolve_model(Some("openai/whisper-1".to_owned())),
-            "openai/whisper-1"
-        );
-    }
-
-    #[test]
     fn client_rejects_an_empty_key() {
         for key in ["", "   "] {
             assert!(matches!(
-                OpenRouter::new(key.to_owned(), DEFAULT_TRANSCRIBE_MODEL.to_owned()),
+                OpenRouter::new(key.to_owned(), "model".to_owned()),
                 Err(Error::EmptyConfiguration(name)) if name == VariableName::OpenRouterApiKey
             ));
         }

@@ -10,17 +10,16 @@
 //! progress; a reaction that fails only logs a warning, because it must never cost a transcript.
 //!
 //! The one-hour window bounds both cost and retries: a file that keeps failing is retried on every
-//! scan until its message ages out, and then left alone. [`VariableName::TranscribeChats`] limits
-//! which chats are transcribed at all, because a transcription spends credits and sends audio to a
-//! third party. The variable is optional: an empty list transcribes nothing and the skip warnings
-//! publish the chat ids an operator needs before the list is known.
+//! scan until its message ages out, and then left alone. The whitelist the composition root resolved
+//! limits which chats are transcribed at all, because a transcription spends credits and sends audio
+//! to a third party. An empty one transcribes nothing and the skip warnings publish the chat ids an
+//! operator needs before the list is known.
 
-use std::collections::HashSet;
 use std::time::Duration;
 
 use crate::domains::attachment::{AttachmentKind, AttachmentRepository, PendingAttachment};
 use crate::domains::outbox::{EnqueueOutcome, NewOutboxMessage, OutboxRepository};
-use crate::infra::config::get_optional;
+use crate::infra::config::Whitelist;
 use crate::infra::ffmpeg::Ffmpeg;
 use crate::infra::openrouter::{AudioFormat, OpenRouter};
 use crate::infra::sentry;
@@ -28,8 +27,7 @@ use crate::infra::telegram_bot::Telegram;
 use crate::services::shutdown::Shutdown;
 use crate::services::unix_now;
 use crate::services::wake::Wake;
-use crate::shared::config::VariableName;
-use crate::shared::result::{Error, Result};
+use crate::shared::result::Error;
 
 /// Plain-text header placed above the transcript in the first reply.
 const REPLY_HEADER: &str = "Расшифровка:";
@@ -59,64 +57,6 @@ const IDLE: Duration = Duration::from_secs(5);
 /// stays on the raw transcript and escaping is applied per chunk, where a chunk boundary can never
 /// split a tag.
 const CHUNK_LIMIT: usize = 4_000;
-
-/// The chats whose audio and video are transcribed.
-///
-/// Membership is a configuration decision, not data, so the check happens after the scan: a chat
-/// that is not listed is logged once and marked processed. An empty whitelist is allowed and
-/// transcribes nothing, which is how an operator discovers the chat ids from the skip warnings.
-#[derive(Debug, Clone)]
-pub struct Whitelist(HashSet<i64>);
-
-impl Whitelist {
-    /// Parses a comma-separated list of numeric chat ids.
-    ///
-    /// Entries are trimmed, empty entries are ignored, and duplicates collapse. An empty list is
-    /// valid and means "transcribe nothing": the bot still runs, so the skip warnings can publish
-    /// the chat ids before the list is known. A non-numeric entry is an error, so a typo cannot
-    /// silently narrow the list.
-    pub fn parse(raw: &str) -> Result<Self> {
-        let mut chats = HashSet::new();
-
-        for token in raw.split(',') {
-            let token = token.trim();
-            if token.is_empty() {
-                continue;
-            }
-
-            let chat_id = token
-                .parse()
-                .map_err(|_| Error::InvalidChatId(token.to_owned()))?;
-            chats.insert(chat_id);
-        }
-
-        Ok(Self(chats))
-    }
-
-    /// Reads the whitelist from [`VariableName::TranscribeChats`].
-    ///
-    /// An unset variable yields an empty whitelist rather than an error; see [`Self::parse`].
-    pub fn from_env() -> Result<Self> {
-        Self::from_value(get_optional(VariableName::TranscribeChats)?)
-    }
-
-    fn from_value(value: Option<String>) -> Result<Self> {
-        match value {
-            Some(raw) => Self::parse(&raw),
-            None => Ok(Self(HashSet::new())),
-        }
-    }
-
-    /// Returns whether `chat_id` may be transcribed.
-    pub fn contains(&self, chat_id: i64) -> bool {
-        self.0.contains(&chat_id)
-    }
-
-    /// Returns whether no chat is white-listed, in which case every attachment is skipped.
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-}
 
 /// Transcribes pending audio and video attachments and queues the transcripts for delivery.
 pub struct Transcriber {
@@ -572,49 +512,6 @@ mod tests {
     #[test]
     fn the_download_cap_is_the_bot_api_limit() {
         assert_eq!(MAX_DOWNLOAD_BYTES, 20 * 1024 * 1024);
-    }
-
-    #[test]
-    fn whitelist_parses_trimmed_and_spaced_ids() {
-        let whitelist = Whitelist::parse(" 1 , 2 ,3 ").expect("a spaced list should parse");
-
-        assert!(whitelist.contains(1));
-        assert!(whitelist.contains(2));
-        assert!(whitelist.contains(3));
-        assert!(!whitelist.contains(4));
-    }
-
-    #[test]
-    fn whitelist_collapses_duplicates_and_trailing_commas() {
-        let whitelist = Whitelist::parse("1,1,2,").expect("duplicates should parse");
-
-        assert!(whitelist.contains(1));
-        assert!(whitelist.contains(2));
-    }
-
-    #[test]
-    fn whitelist_allows_an_empty_list() {
-        for raw in ["", "   ", ",", " , "] {
-            let whitelist = Whitelist::parse(raw).expect("an empty list should parse");
-
-            assert!(whitelist.is_empty(), "raw {raw:?}");
-            assert!(!whitelist.contains(1));
-        }
-    }
-
-    #[test]
-    fn whitelist_treats_an_unset_variable_as_empty() {
-        let whitelist = Whitelist::from_value(None).expect("an unset variable should parse");
-
-        assert!(whitelist.is_empty());
-    }
-
-    #[test]
-    fn whitelist_rejects_a_non_numeric_entry() {
-        match Whitelist::parse("1,two,3") {
-            Err(Error::InvalidChatId(token)) => assert_eq!(token, "two"),
-            other => panic!("expected a non-numeric entry, got {other:?}"),
-        }
     }
 
     #[test]
