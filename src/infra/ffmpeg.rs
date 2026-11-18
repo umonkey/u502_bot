@@ -3,7 +3,7 @@
 //! [`Ffmpeg::extract_audio`] reduces one video file to the mono 16 kHz Ogg/Opus speech audio the
 //! model accepts, and [`Ffmpeg::probe`] reports whether the binary runs at all. ffmpeg is spawned as
 //! a child process rather than linked: the build stays unchanged, a missing binary degrades to
-//! [`FfmpegError::Unavailable`] instead of failing startup, and `kill_on_drop` keeps an abandoned
+//! [`Error::FfmpegUnavailable`] instead of failing startup, and `kill_on_drop` keeps an abandoned
 //! extraction from outliving the bot.
 //!
 //! The client records its own telemetry: the call counter and duration are captured for failed and
@@ -11,12 +11,12 @@
 //! the caller, which logs them once with the attachment they belong to.
 
 use std::ffi::OsString;
-use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::infra::config::{VariableName, get_optional};
 use crate::infra::sentry;
+use crate::shared::result::{Error, Result};
 
 /// Binary used when [`VariableName::FfmpegPath`] is unset or cannot be read.
 const DEFAULT_FFMPEG: &str = "ffmpeg";
@@ -26,57 +26,6 @@ const TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Characters of an error body kept for the logs.
 const MAX_ERROR_BODY: usize = 500;
-
-/// Failure modes of probing or running ffmpeg.
-#[derive(Debug)]
-pub enum FfmpegError {
-    /// The binary could not be spawned: it is missing, or it is not on `PATH`.
-    Unavailable(std::io::Error),
-    /// ffmpeg exited with a non-success status.
-    Status { code: Option<i32>, stderr: String },
-    /// The child process could not be started or waited for.
-    Io(std::io::Error),
-    /// The input carries no audio stream, so there is nothing to extract.
-    NoAudioStream { stderr: String },
-    /// The extraction did not finish within [`TIMEOUT`].
-    Timeout,
-}
-
-impl fmt::Display for FfmpegError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Unavailable(source) => write!(formatter, "ffmpeg is not available: {source}"),
-            Self::Status { code, stderr } => match code {
-                Some(code) => write!(formatter, "ffmpeg exited with status {code}: {stderr}"),
-                None => write!(formatter, "ffmpeg was terminated by a signal: {stderr}"),
-            },
-            Self::Io(source) => write!(formatter, "failed to run ffmpeg: {source}"),
-            Self::NoAudioStream { stderr } => {
-                write!(formatter, "the input carries no audio stream: {stderr}")
-            }
-            Self::Timeout => write!(
-                formatter,
-                "ffmpeg did not finish within {} seconds",
-                TIMEOUT.as_secs()
-            ),
-        }
-    }
-}
-
-impl std::error::Error for FfmpegError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Unavailable(source) | Self::Io(source) => Some(source),
-            Self::Status { .. } | Self::NoAudioStream { .. } | Self::Timeout => None,
-        }
-    }
-}
-
-impl From<std::io::Error> for FfmpegError {
-    fn from(source: std::io::Error) -> Self {
-        Self::Io(source)
-    }
-}
 
 /// Client for the `ffmpeg` command-line program.
 pub struct Ffmpeg {
@@ -112,10 +61,10 @@ impl Ffmpeg {
 
     /// Reports whether the binary runs.
     ///
-    /// `ffmpeg -version` exits immediately, so it needs no timeout of its own. A non-zero exit is a
-    /// [`FfmpegError::Status`], which is what an unusable install or a broken dynamic link looks
+    /// `ffmpeg -version` exits immediately, so it needs no timeout of its own. A non-zero exit is an
+    /// [`Error::FfmpegStatus`], which is what an unusable install or a broken dynamic link looks
     /// like.
-    pub async fn probe(&self) -> Result<(), FfmpegError> {
+    pub async fn probe(&self) -> Result<()> {
         let completed = tokio::process::Command::new(&self.binary)
             .arg("-version")
             .kill_on_drop(true)
@@ -128,7 +77,7 @@ impl Ffmpeg {
         }
 
         let stderr = String::from_utf8_lossy(&completed.stderr);
-        Err(FfmpegError::Status {
+        Err(Error::FfmpegStatus {
             code: completed.status.code(),
             stderr: truncate(&stderr),
         })
@@ -139,7 +88,7 @@ impl Ffmpeg {
     /// The stopwatch wraps the whole timeout, so a timed-out extraction still increments
     /// `ffmpeg.calls` and records a `ffmpeg.duration`; a call is a call whether it succeeds or not.
     /// Failures are returned so the caller can log them with context.
-    pub async fn extract_audio(&self, input: &Path, output: &Path) -> Result<(), FfmpegError> {
+    pub async fn extract_audio(&self, input: &Path, output: &Path) -> Result<()> {
         let started = Instant::now();
         let outcome = tokio::time::timeout(TIMEOUT, self.run(input, output)).await;
         let elapsed = started.elapsed();
@@ -147,11 +96,13 @@ impl Ffmpeg {
 
         match outcome {
             Ok(result) => result,
-            Err(_) => Err(FfmpegError::Timeout),
+            Err(_) => Err(Error::FfmpegTimeout {
+                seconds: TIMEOUT.as_secs(),
+            }),
         }
     }
 
-    async fn run(&self, input: &Path, output: &Path) -> Result<(), FfmpegError> {
+    async fn run(&self, input: &Path, output: &Path) -> Result<()> {
         // `Command::output` captures both pipes, so ffmpeg cannot block on a full buffer.
         let completed = tokio::process::Command::new(&self.binary)
             .args(extraction_args(input, output))
@@ -166,12 +117,12 @@ impl Ffmpeg {
 
         let stderr = String::from_utf8_lossy(&completed.stderr);
         if is_missing_audio(&stderr) {
-            return Err(FfmpegError::NoAudioStream {
+            return Err(Error::NoAudioStream {
                 stderr: truncate(&stderr),
             });
         }
 
-        Err(FfmpegError::Status {
+        Err(Error::FfmpegStatus {
             code: completed.status.code(),
             stderr: truncate(&stderr),
         })
@@ -179,10 +130,10 @@ impl Ffmpeg {
 }
 
 /// Maps a failure to start the child process onto the error the caller matches on.
-fn spawn_error(source: std::io::Error) -> FfmpegError {
+fn spawn_error(source: std::io::Error) -> Error {
     match source.kind() {
-        std::io::ErrorKind::NotFound => FfmpegError::Unavailable(source),
-        _ => FfmpegError::Io(source),
+        std::io::ErrorKind::NotFound => Error::FfmpegUnavailable(source),
+        _ => Error::FfmpegIo(source),
     }
 }
 
@@ -338,10 +289,10 @@ mod tests {
             .await
             .expect_err("a missing binary should not extract audio");
         match error {
-            FfmpegError::Unavailable(source) => {
+            Error::FfmpegUnavailable(source) => {
                 assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
             }
-            other => panic!("expected Unavailable, got {other}"),
+            other => panic!("expected FfmpegUnavailable, got {other}"),
         }
     }
 
@@ -370,7 +321,7 @@ mod tests {
         let error = loop {
             match ffmpeg.extract_audio(&input, &output).await {
                 Ok(()) => panic!("a failing binary should not extract audio"),
-                Err(FfmpegError::Io(source))
+                Err(Error::FfmpegIo(source))
                     if source.raw_os_error() == Some(TEXT_FILE_BUSY) && attempt < 20 =>
                 {
                     attempt += 1;
@@ -381,11 +332,11 @@ mod tests {
         };
 
         match error {
-            FfmpegError::Status { code, stderr } => {
+            Error::FfmpegStatus { code, stderr } => {
                 assert_eq!(code, Some(3));
                 assert!(stderr.contains("simulated failure"), "stderr {stderr:?}");
             }
-            other => panic!("expected Status, got {other}"),
+            other => panic!("expected FfmpegStatus, got {other}"),
         }
     }
 }

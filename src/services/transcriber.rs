@@ -13,18 +13,18 @@
 //! publish the chat ids an operator needs before the list is known.
 
 use std::collections::HashSet;
-use std::fmt;
 use std::time::Duration;
 
 use crate::domains::attachment::{AttachmentKind, AttachmentRepository, PendingAttachment};
-use crate::domains::outbox::{NewOutboxMessage, OutboxError, OutboxRepository};
-use crate::infra::config::{VariableError, VariableName, get_optional};
-use crate::infra::ffmpeg::{Ffmpeg, FfmpegError};
+use crate::domains::outbox::{NewOutboxMessage, OutboxRepository};
+use crate::infra::config::{VariableName, get_optional};
+use crate::infra::ffmpeg::Ffmpeg;
 use crate::infra::openrouter::{AudioFormat, OpenRouter};
 use crate::infra::sentry;
 use crate::infra::telegram_bot::Telegram;
 use crate::services::shutdown::Shutdown;
 use crate::services::unix_now;
+use crate::shared::result::{Error, Result};
 
 /// Instruction sent with every file; it asks for a verbatim transcript and nothing else.
 const TRANSCRIPTION_PROMPT: &str = "Transcribe this voice message verbatim in the language it is spoken. Return only the transcript: no commentary, no timestamps, no speaker labels, no translation. If there is no speech, return an empty string.";
@@ -67,7 +67,7 @@ impl Whitelist {
     /// valid and means "transcribe nothing": the bot still runs, so the skip warnings can publish
     /// the chat ids before the list is known. A non-numeric entry is an error, so a typo cannot
     /// silently narrow the list.
-    pub fn parse(raw: &str) -> Result<Self, WhitelistError> {
+    pub fn parse(raw: &str) -> Result<Self> {
         let mut chats = HashSet::new();
 
         for token in raw.split(',') {
@@ -78,7 +78,7 @@ impl Whitelist {
 
             let chat_id = token
                 .parse()
-                .map_err(|_| WhitelistError::NotANumber(token.to_owned()))?;
+                .map_err(|_| Error::InvalidChatId(token.to_owned()))?;
             chats.insert(chat_id);
         }
 
@@ -88,13 +88,11 @@ impl Whitelist {
     /// Reads the whitelist from [`VariableName::TranscribeChats`].
     ///
     /// An unset variable yields an empty whitelist rather than an error; see [`Self::parse`].
-    pub fn from_env() -> Result<Self, WhitelistError> {
-        get_optional(VariableName::TranscribeChats)
-            .map_err(WhitelistError::Config)
-            .and_then(Self::from_value)
+    pub fn from_env() -> Result<Self> {
+        Self::from_value(get_optional(VariableName::TranscribeChats)?)
     }
 
-    fn from_value(value: Option<String>) -> Result<Self, WhitelistError> {
+    fn from_value(value: Option<String>) -> Result<Self> {
         match value {
             Some(raw) => Self::parse(&raw),
             None => Ok(Self(HashSet::new())),
@@ -109,38 +107,6 @@ impl Whitelist {
     /// Returns whether no chat is white-listed, in which case every attachment is skipped.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
-    }
-}
-
-/// Failure modes of reading the transcription whitelist.
-#[derive(Debug)]
-pub enum WhitelistError {
-    /// [`VariableName::TranscribeChats`] could not be resolved: a non-Unicode value, or a file
-    /// that cannot be read or is not UTF-8.
-    Config(VariableError),
-    /// One entry is not a numeric chat id.
-    NotANumber(String),
-}
-
-impl fmt::Display for WhitelistError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Config(source) => write!(formatter, "{source}"),
-            Self::NotANumber(token) => write!(
-                formatter,
-                "{} entry {token:?} is not a numeric chat id",
-                VariableName::TranscribeChats
-            ),
-        }
-    }
-}
-
-impl std::error::Error for WhitelistError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Config(source) => Some(source),
-            Self::NotANumber(_) => None,
-        }
     }
 }
 
@@ -379,7 +345,7 @@ impl Transcriber {
         };
         if let Err(error) = extracted {
             match &error {
-                FfmpegError::Unavailable(_) | FfmpegError::NoAudioStream { .. } => {
+                Error::FfmpegUnavailable(_) | Error::NoAudioStream { .. } => {
                     tracing::warn!(
                         attachment_id = attachment.id,
                         chat_id = attachment.chat_id,
@@ -451,7 +417,7 @@ impl Transcriber {
         attachment: &PendingAttachment,
         transcript: &str,
         now: i64,
-    ) -> Result<(), OutboxError> {
+    ) -> Result<()> {
         for (index, chunk) in chunks(transcript, CHUNK_LIMIT).into_iter().enumerate() {
             let message = NewOutboxMessage {
                 chat_id: attachment.chat_id,
@@ -597,7 +563,7 @@ mod tests {
     #[test]
     fn whitelist_rejects_a_non_numeric_entry() {
         match Whitelist::parse("1,two,3") {
-            Err(WhitelistError::NotANumber(token)) => assert_eq!(token, "two"),
+            Err(Error::InvalidChatId(token)) => assert_eq!(token, "two"),
             other => panic!("expected a non-numeric entry, got {other:?}"),
         }
     }

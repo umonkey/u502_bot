@@ -4,9 +4,9 @@
 //! [`NewMessage`] before storing. [`MessageRepository`] must stay in sync with the `messages` table
 //! in `dev/schema.sql`.
 
-use std::fmt;
-
 use sqlx::SqlitePool;
+
+use crate::shared::result::Result;
 
 /// One message to write to the `messages` table.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,35 +34,6 @@ pub enum StoreOutcome {
     Duplicate,
 }
 
-/// Failure modes of storing a message.
-#[derive(Debug)]
-pub enum MessageError {
-    /// SQLite rejected the statement.
-    Sqlite(sqlx::Error),
-}
-
-impl fmt::Display for MessageError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Sqlite(source) => write!(formatter, "database error: {source}"),
-        }
-    }
-}
-
-impl std::error::Error for MessageError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Sqlite(source) => Some(source),
-        }
-    }
-}
-
-impl From<sqlx::Error> for MessageError {
-    fn from(source: sqlx::Error) -> Self {
-        Self::Sqlite(source)
-    }
-}
-
 /// Writes messages to the `messages` table.
 pub struct MessageRepository {
     pool: SqlitePool,
@@ -78,7 +49,7 @@ impl MessageRepository {
     ///
     /// Must stay in sync with the `messages` table in `dev/schema.sql`: the column order and the
     /// `UNIQUE (chat_id, message_id)` constraint are what make this statement idempotent.
-    pub async fn store(&self, message: &NewMessage) -> Result<StoreOutcome, MessageError> {
+    pub async fn store(&self, message: &NewMessage) -> Result<StoreOutcome> {
         let result = sqlx::query(
             "INSERT OR IGNORE INTO messages (chat_id, message_id, received_at, sender_id, sender_name, message) \
              VALUES (?, ?, ?, ?, ?, ?)",

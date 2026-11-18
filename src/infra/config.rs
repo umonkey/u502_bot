@@ -8,8 +8,9 @@
 //!    configuration, and that file's contents are the value. `NAME` is the fallback.
 //! 2. The value is trimmed of surrounding whitespace, so a trailing newline in a file never reaches
 //!    a caller, and a whitespace-only value means the variable is unset.
-//! 3. Values are UTF-8: a non-Unicode variable, an unreadable file, and a file that is not UTF-8 are
-//!    reported as [`VariableError`] instead of being silently treated as absent.
+//! 3. Values are UTF-8: a non-Unicode variable is reported as [`Error::VariableNotUnicode`], and an
+//!    unreadable file, or one that is not UTF-8, as [`Error::ReadConfiguration`], instead of being
+//!    silently treated as absent.
 //!
 //! `Ok(None)` means the variable is not configured, and the caller decides whether that is fatal,
 //! a default, or a disable; only [`require_secret`] treats absence as an error. `RUST_LOG` is the one
@@ -19,6 +20,8 @@ use std::env::VarError;
 use std::fmt;
 use std::io;
 use std::path::PathBuf;
+
+use crate::shared::result::{Error, Result};
 
 /// Names of the environment variables this crate reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,55 +63,21 @@ impl fmt::Display for VariableName {
     }
 }
 
-/// Failure modes of a variable lookup.
-#[derive(Debug)]
-pub enum VariableError {
-    /// Neither `NAME_FILE` nor `NAME` is set, or the value is whitespace-only.
-    Missing(String),
-    /// The value of a variable, or its name, is not valid Unicode.
-    NotUnicode(String),
-    /// The file named by `NAME_FILE` could not be read, including a file that is not UTF-8.
-    ReadFile { path: PathBuf, source: io::Error },
-}
-
-impl fmt::Display for VariableError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing(name) => {
-                write!(
-                    formatter,
-                    "{name} is not set: neither {name}_FILE nor {name} exists"
-                )
-            }
-            Self::NotUnicode(name) => write!(formatter, "{name} is not valid Unicode"),
-            Self::ReadFile { path, source } => {
-                write!(formatter, "failed to read {}: {source}", path.display())
-            }
-        }
-    }
-}
-
-impl std::error::Error for VariableError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::ReadFile { source, .. } => Some(source),
-            Self::Missing(_) | Self::NotUnicode(_) => None,
-        }
-    }
-}
-
 /// Resolves one environment variable.
 ///
 /// `Ok(None)` means the variable is not configured. `Err` means a value is present but unusable:
 /// a non-Unicode variable, or a `NAME_FILE` path that cannot be read or is not UTF-8. See the
 /// module documentation for the precedence and the trimming rule.
-pub fn get_optional(name: VariableName) -> Result<Option<String>, VariableError> {
+pub fn get_optional(name: VariableName) -> Result<Option<String>> {
     resolve(name.as_str(), |key| std::env::var(key), read_file)
 }
 
 /// Resolves a secret that startup cannot run without.
-pub fn require_secret(name: VariableName) -> Result<String, VariableError> {
-    get_optional(name)?.ok_or_else(|| VariableError::Missing(name.as_str().to_owned()))
+///
+/// This is the only resolver that treats absence as an error, and it is what a caller uses instead
+/// of checking [`get_optional`] for `None`.
+pub fn require_secret(name: VariableName) -> Result<String> {
+    get_optional(name)?.ok_or_else(|| Error::MissingVariable(name.as_str().to_owned()))
 }
 
 /// The one algorithm behind [`get_optional`], with the lookups injected so tests need not touch the
@@ -116,8 +85,8 @@ pub fn require_secret(name: VariableName) -> Result<String, VariableError> {
 fn resolve(
     name: &str,
     lookup: impl Fn(&str) -> Result<String, VarError>,
-    read_file: impl Fn(&str) -> Result<String, VariableError>,
-) -> Result<Option<String>, VariableError> {
+    read_file: impl Fn(&str) -> Result<String>,
+) -> Result<Option<String>> {
     let file_key = format!("{name}_FILE");
     let raw = match lookup(&file_key) {
         Ok(path) => read_file(&path)?,
@@ -125,10 +94,10 @@ fn resolve(
             Ok(value) => value,
             Err(VarError::NotPresent) => return Ok(None),
             Err(VarError::NotUnicode(_)) => {
-                return Err(VariableError::NotUnicode(name.to_owned()));
+                return Err(Error::VariableNotUnicode(name.to_owned()));
             }
         },
-        Err(VarError::NotUnicode(_)) => return Err(VariableError::NotUnicode(file_key)),
+        Err(VarError::NotUnicode(_)) => return Err(Error::VariableNotUnicode(file_key)),
     };
 
     let trimmed = raw.trim();
@@ -137,13 +106,13 @@ fn resolve(
 }
 
 /// Reads a file and decodes it as UTF-8.
-fn read_file(path: &str) -> Result<String, VariableError> {
+fn read_file(path: &str) -> Result<String> {
     std::fs::read(path)
         .and_then(|bytes| {
             String::from_utf8(bytes)
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "not valid UTF-8"))
         })
-        .map_err(|source| VariableError::ReadFile {
+        .map_err(|source| Error::ReadConfiguration {
             path: PathBuf::from(path),
             source,
         })
@@ -175,7 +144,7 @@ mod tests {
 
     #[test]
     fn missing_error_names_both_forms() {
-        let message = VariableError::Missing("TOKEN".to_owned()).to_string();
+        let message = Error::MissingVariable("TOKEN".to_owned()).to_string();
 
         assert!(message.contains("TOKEN"), "message {message:?}");
         assert!(message.contains("TOKEN_FILE"), "message {message:?}");
@@ -184,14 +153,14 @@ mod tests {
 
     #[test]
     fn not_unicode_error_names_the_variable() {
-        let message = VariableError::NotUnicode("TOKEN".to_owned()).to_string();
+        let message = Error::VariableNotUnicode("TOKEN".to_owned()).to_string();
 
         assert_eq!(message, "TOKEN is not valid Unicode");
     }
 
     #[test]
     fn read_file_error_names_the_path() {
-        let error = VariableError::ReadFile {
+        let error = Error::ReadConfiguration {
             path: PathBuf::from("/run/secrets/token"),
             source: io::Error::new(io::ErrorKind::NotFound, "no such file"),
         };
@@ -291,7 +260,7 @@ mod tests {
             _ => Err(VarError::NotPresent),
         };
         let read_file = |_: &str| {
-            Err(VariableError::ReadFile {
+            Err(Error::ReadConfiguration {
                 path: PathBuf::from("/run/secrets/missing"),
                 source: io::Error::new(io::ErrorKind::NotFound, "no such file"),
             })
@@ -300,11 +269,11 @@ mod tests {
         let error =
             resolve("TOKEN", lookup, read_file).expect_err("unreadable file should not resolve");
         match error {
-            VariableError::ReadFile { path, source } => {
+            Error::ReadConfiguration { path, source } => {
                 assert_eq!(path, PathBuf::from("/run/secrets/missing"));
                 assert_eq!(source.kind(), io::ErrorKind::NotFound);
             }
-            other => panic!("expected ReadFile, got {other:?}"),
+            other => panic!("expected ReadConfiguration, got {other:?}"),
         }
     }
 
@@ -317,7 +286,7 @@ mod tests {
         let read_file = |_: &str| panic!("non-Unicode path cannot be read");
         let error = resolve("TOKEN", file_lookup, read_file)
             .expect_err("non-Unicode file variable should not resolve");
-        assert!(matches!(error, VariableError::NotUnicode(name) if name == "TOKEN_FILE"));
+        assert!(matches!(error, Error::VariableNotUnicode(name) if name == "TOKEN_FILE"));
 
         let direct_lookup = |key: &str| match key {
             "TOKEN_FILE" => Err(VarError::NotPresent),
@@ -327,7 +296,7 @@ mod tests {
         let read_file = |_: &str| panic!("no file should be read without TOKEN_FILE");
         let error = resolve("TOKEN", direct_lookup, read_file)
             .expect_err("non-Unicode direct variable should not resolve");
-        assert!(matches!(error, VariableError::NotUnicode(name) if name == "TOKEN"));
+        assert!(matches!(error, Error::VariableNotUnicode(name) if name == "TOKEN"));
     }
 
     #[test]
@@ -348,10 +317,10 @@ mod tests {
         let path = path.to_str().expect("temporary paths are Unicode");
 
         match read_file(path) {
-            Err(VariableError::ReadFile { source, .. }) => {
+            Err(Error::ReadConfiguration { source, .. }) => {
                 assert_eq!(source.kind(), io::ErrorKind::NotFound);
             }
-            other => panic!("expected ReadFile, got {other:?}"),
+            other => panic!("expected ReadConfiguration, got {other:?}"),
         }
     }
 
@@ -363,10 +332,10 @@ mod tests {
         let path = path.to_str().expect("temporary paths are Unicode");
 
         match read_file(path) {
-            Err(VariableError::ReadFile { source, .. }) => {
+            Err(Error::ReadConfiguration { source, .. }) => {
                 assert_eq!(source.kind(), io::ErrorKind::InvalidData);
             }
-            other => panic!("expected ReadFile, got {other:?}"),
+            other => panic!("expected ReadConfiguration, got {other:?}"),
         }
     }
 }

@@ -43,9 +43,9 @@ Running `make` without a target executes `check`.
 - `src/domains/message.rs`: the message model and the repository that owns the `messages` SQL.
 - `src/domains/outbox.rs`: the outbox model and the repository that owns the `outbox` SQL.
 - `src/infra.rs`: declares the infra modules.
-- `src/infra/config.rs`: `VariableName`, the enum naming every environment variable, plus `get_optional`, `require_secret`, and `VariableError`; one resolver gives every variable the same form: `<NAME>_FILE` first, then `<NAME>`, the value trimmed, blank meaning unset, UTF-8 only.
-- `src/infra/database.rs`: `Database`, `DatabaseError`, `database_path`, and `SCHEMA`; the async SQLite client, which opens a pooled connection and applies the embedded schema without knowing any table.
-- `src/infra/ffmpeg.rs`: `Ffmpeg` and `FfmpegError`; the client for the `ffmpeg` program, which extracts a video's first audio track to Ogg/Opus under a timeout, kills the child on drop, and records its own call telemetry. The binary path comes from `VariableName::FfmpegPath`; an unusable value, whether non-UTF-8 or an unreadable `FFMPEG_PATH_FILE`, logs one warning and falls back to the `ffmpeg` on `PATH`.
+- `src/infra/config.rs`: `VariableName`, the enum naming every environment variable, plus `get_optional` and `require_secret`; one resolver gives every variable the same form: `<NAME>_FILE` first, then `<NAME>`, the value trimmed, blank meaning unset, UTF-8 only.
+- `src/infra/database.rs`: `Database`, `database_path`, and `SCHEMA`; the async SQLite client, which opens a pooled connection and applies the embedded schema without knowing any table.
+- `src/infra/ffmpeg.rs`: `Ffmpeg`; the client for the `ffmpeg` program, which extracts a video's first audio track to Ogg/Opus under a timeout, kills the child on drop, and records its own call telemetry. The binary path comes from `VariableName::FfmpegPath`; an unusable value, whether non-UTF-8 or an unreadable `FFMPEG_PATH_FILE`, logs one warning and falls back to the `ffmpeg` on `PATH`.
 - `src/infra/openrouter.rs`: `OpenRouter`, `model_from_env`, `DEFAULT_TRANSCRIBE_MODEL`, and `AudioFormat`; the audio transcription client, which records its own call telemetry.
 - `src/infra/sentry.rs`: `VariableName::SentryDsn`, `init` (the `tracing` subscriber, the optional Sentry client, an error layer, and a crate-scoped structured-log layer), and the metric functions for messages, attachments, the outbox, OpenRouter, and ffmpeg.
 - `src/infra/signal.rs`: `Signal` and `wait`; the listener for `SIGINT` and, on Unix, `SIGTERM`.
@@ -55,12 +55,14 @@ Running `make` without a target executes `check`.
 - `src/services/ingestor.rs`: the message loop; it stores every delivered message and its attachment metadata, drains what the dispatcher already queued, then stops polling.
 - `src/services/transcriber.rs`: the transcription loop for audio and video and the `TRANSCRIBE_CHATS` whitelist; it processes an audio batch, then a video batch, and a video is downloaded and reduced with `ffmpeg` before it joins the audio flow.
 - `src/services/outbox.rs`: the delivery loop; it sends queued replies and marks them sent.
+- `src/shared.rs` / `src/shared/result.rs`: the crate-wide `Error` enum, with one variant per failure mode the bot can produce, and the `Result<T>` alias every fallible function returns; any layer may use them.
 - `dev/schema.sql`: initial SQLite schema, embedded at build time and applied on every startup.
 
 Add every new subcommand as a variant of the `Command` enum in `src/cli/mod.rs`, route it from `run()`, and implement it in `src/cli/<command>.rs`.
 
 ## Layering
 
+- `src/shared/*`: cross-cutting types every layer may use; never a client, SQL, or a loop.
 - `src/infra/*`: clients for exactly one external system; they never call each other, hold SQL, or contain domain logic. Configuration lookup and the observability sink are the exceptions: both are shared services rather than peer integrations.
 - `src/domains/*`: models and repositories; each repository owns the SQL for its data.
 - `src/services/*`: long-running tasks a command composes; they loop over time, own no SQL and no clients of their own, and hold the clients and repositories they were given.
@@ -117,6 +119,7 @@ Architecture decisions live in `docs/adr/`, one Markdown file per decision, name
 - ADR 0009 records the decision to transcribe audio in a separate service.
 - ADR 0010 records the decision to stop the bot gracefully on a signal.
 - ADR 0011 records the decision to extract a video's audio track with ffmpeg before transcribing it.
+- ADR 0012 records the decision to keep one crate-wide error enum and one `Result` alias.
 
 Run `make format-docs` after editing anything under `docs/`.
 
@@ -181,7 +184,7 @@ chmod 600 .secrets/openrouter_api_key
 
 ## Storage
 
-Messages live in a local SQLite database. The schema is embedded at build time with `include_str!` from `dev/schema.sql` and applied on every startup, so there is no schema path or environment variable to configure. The database is opened asynchronously at startup and accessed through the message repository in `src/domains/message.rs`, the attachment repository in `src/domains/attachment.rs`, and the outbox repository in `src/domains/outbox.rs`. The database path comes from `DATABASE_PATH`, read through `get_optional(VariableName::DatabasePath)` with the same `<NAME>_FILE` form as every other variable, and it remains required, so a missing value fails startup; Compose sets it to `/opt/data/database.sqlite`. The ingestor stores every delivered message in `messages` and skips a redelivery by its `(chat_id, message_id)` uniqueness. Every incoming audio or video message also records one row in `attachments`, keyed by the same `(chat_id, message_id)` pair, holding the Telegram `file_id`, the MIME type, the duration, the size, and a `transcribed` flag that means processed: transcribed or deliberately skipped. The transcriber scans that flag, reading audio and video rows whose message is at most an hour old, so the age of the message bounds both cost and retries; a partial index serves the pending scan. Outgoing replies live in `outbox`, one row per Telegram message, holding the chat, the message id to answer when there is one, the queue time, the delivery time, and the text. `sent_at` stays NULL until Telegram accepts a row, and a partial index serves the pending scan.
+Messages live in a local SQLite database. The schema is embedded at build time with `include_str!` from `dev/schema.sql` and applied on every startup, so there is no schema path or environment variable to configure. The database is opened asynchronously at startup and accessed through the message repository in `src/domains/message.rs`, the attachment repository in `src/domains/attachment.rs`, and the outbox repository in `src/domains/outbox.rs`. The database path comes from `DATABASE_PATH`, read through `require_secret(VariableName::DatabasePath)` with the same `<NAME>_FILE` form as every other variable, and it remains required, so a missing value fails startup; Compose sets it to `/opt/data/database.sqlite`. The ingestor stores every delivered message in `messages` and skips a redelivery by its `(chat_id, message_id)` uniqueness. Every incoming audio or video message also records one row in `attachments`, keyed by the same `(chat_id, message_id)` pair, holding the Telegram `file_id`, the MIME type, the duration, the size, and a `transcribed` flag that means processed: transcribed or deliberately skipped. The transcriber scans that flag, reading audio and video rows whose message is at most an hour old, so the age of the message bounds both cost and retries; a partial index serves the pending scan. Outgoing replies live in `outbox`, one row per Telegram message, holding the chat, the message id to answer when there is one, the queue time, the delivery time, and the text. `sent_at` stays NULL until Telegram accepts a row, and a partial index serves the pending scan.
 
 ## Observability
 

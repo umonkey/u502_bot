@@ -5,7 +5,6 @@
 //! text reply. Storage, metrics, and domain decisions belong to the caller: this module knows nothing
 //! about a database, a repository, a metric, or message content beyond forwarding it.
 
-use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
@@ -16,6 +15,8 @@ use teloxide::prelude::*;
 use teloxide::types::{FileId, MessageId, ParseMode, ReplyParameters};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+
+use crate::shared::result::{Error, Result};
 
 /// How long [`Messages::stop`] waits for the dispatcher task before giving up.
 const DISPATCHER_STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -82,7 +83,7 @@ impl Telegram {
     ///
     /// Returns `Err` only when the initial `getMe` call fails, which usually means an invalid token
     /// or no network.
-    pub async fn connect(token: String) -> Result<Self, teloxide::RequestError> {
+    pub async fn connect(token: String) -> Result<Self> {
         let bot = Bot::new(token);
 
         let me = bot.get_me().await?;
@@ -117,9 +118,15 @@ impl Telegram {
     }
 
     /// Downloads the file a Telegram `file_id` names into `destination`, replacing its contents.
-    pub async fn download(&self, file_id: &str, destination: &Path) -> Result<(), TelegramError> {
+    pub async fn download(&self, file_id: &str, destination: &Path) -> Result<()> {
         let file = self.bot.get_file(FileId(file_id.to_owned())).await?;
-        let mut destination_file = tokio::fs::File::create(destination).await?;
+        let mut destination_file =
+            tokio::fs::File::create(destination)
+                .await
+                .map_err(|source| Error::WriteFile {
+                    path: destination.to_path_buf(),
+                    source,
+                })?;
         self.bot
             .download_file(&file.path, &mut destination_file)
             .await?;
@@ -130,12 +137,7 @@ impl Telegram {
     /// Sends `text` to `chat_id`, answering `reply_to` when it is set.
     ///
     /// `text` is Telegram HTML, already escaped by the producer; this method only forwards it.
-    pub async fn send(
-        &self,
-        chat_id: i64,
-        text: &str,
-        reply_to: Option<i64>,
-    ) -> Result<(), TelegramError> {
+    pub async fn send(&self, chat_id: i64, text: &str, reply_to: Option<i64>) -> Result<()> {
         let mut request = self
             .bot
             .send_message(ChatId(chat_id), text)
@@ -151,69 +153,11 @@ impl Telegram {
     }
 }
 
-/// Failure modes of a Telegram file download or a sent message.
-#[derive(Debug)]
-pub enum TelegramError {
-    /// Telegram rejected an API call.
-    Request(teloxide::RequestError),
-    /// Telegram accepted the call but the file transfer failed.
-    Download(teloxide::DownloadError),
-    /// The local destination file could not be created.
-    Write(std::io::Error),
-    /// A message id from the database does not fit in Telegram's 32-bit message id.
-    MessageId(i64),
-}
-
-impl fmt::Display for TelegramError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Request(source) => write!(formatter, "telegram request error: {source}"),
-            Self::Download(source) => write!(formatter, "telegram download error: {source}"),
-            Self::Write(source) => write!(formatter, "file write error: {source}"),
-            Self::MessageId(id) => {
-                write!(
-                    formatter,
-                    "message id {id} does not fit in a Telegram message id"
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for TelegramError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Request(source) => Some(source),
-            Self::Download(source) => Some(source),
-            Self::Write(source) => Some(source),
-            Self::MessageId(_) => None,
-        }
-    }
-}
-
-impl From<teloxide::RequestError> for TelegramError {
-    fn from(source: teloxide::RequestError) -> Self {
-        Self::Request(source)
-    }
-}
-
-impl From<teloxide::DownloadError> for TelegramError {
-    fn from(source: teloxide::DownloadError) -> Self {
-        Self::Download(source)
-    }
-}
-
-impl From<std::io::Error> for TelegramError {
-    fn from(source: std::io::Error) -> Self {
-        Self::Write(source)
-    }
-}
-
 /// Maps a reply target to the parameters Telegram needs, rejecting an id it cannot carry.
-fn reply_parameters(reply_to: Option<i64>) -> Result<Option<ReplyParameters>, TelegramError> {
+fn reply_parameters(reply_to: Option<i64>) -> Result<Option<ReplyParameters>> {
     reply_to
         .map(|id| {
-            let message_id = i32::try_from(id).map_err(|_| TelegramError::MessageId(id))?;
+            let message_id = i32::try_from(id).map_err(|_| Error::MessageIdOutOfRange(id))?;
 
             Ok(ReplyParameters::new(MessageId(message_id)))
         })
@@ -255,7 +199,7 @@ mod tests {
         let id = i64::from(i32::MAX) + 1;
 
         match reply_parameters(Some(id)) {
-            Err(TelegramError::MessageId(reported)) => assert_eq!(reported, id),
+            Err(Error::MessageIdOutOfRange(reported)) => assert_eq!(reported, id),
             other => panic!("expected a message id error, got {other:?}"),
         }
     }

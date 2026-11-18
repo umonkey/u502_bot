@@ -17,6 +17,7 @@ use crate::services::ingestor::Ingestor;
 use crate::services::outbox::Outbox;
 use crate::services::shutdown::Shutdown;
 use crate::services::transcriber::{Transcriber, Whitelist};
+use crate::shared::result::Result;
 
 pub async fn run() -> ExitCode {
     let _sentry_guard = sentry::init();
@@ -118,7 +119,7 @@ async fn watch_for_shutdown(shutdown: Shutdown) {
 }
 
 /// Opens the database named by `DATABASE_PATH` and applies the embedded schema.
-async fn init_database() -> Result<database::Database, database::DatabaseError> {
+async fn init_database() -> Result<database::Database> {
     let path = database::database_path()?;
 
     let database = database::Database::connect(&path).await?;
@@ -129,10 +130,7 @@ async fn init_database() -> Result<database::Database, database::DatabaseError> 
 }
 
 /// Logs a startup failure and turns it into the exit code `start` propagates.
-fn resolve<T, E>(result: Result<T, E>, message: &'static str) -> Result<T, ExitCode>
-where
-    E: std::error::Error + 'static,
-{
+fn resolve<T>(result: Result<T>, message: &'static str) -> Result<T, ExitCode> {
     result.map_err(|error| {
         tracing::error!(error = &error as &dyn std::error::Error, "{message}");
 

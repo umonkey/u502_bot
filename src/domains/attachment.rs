@@ -8,9 +8,9 @@
 //! same order, and a constraint would only turn an attachment write into a failure mode of the
 //! message write.
 
-use std::fmt;
-
 use sqlx::{Row, SqlitePool};
+
+use crate::shared::result::Result;
 
 /// The media family an attachment belongs to.
 ///
@@ -93,35 +93,6 @@ pub enum StoreOutcome {
     Duplicate,
 }
 
-/// Failure modes of storing an attachment.
-#[derive(Debug)]
-pub enum AttachmentError {
-    /// SQLite rejected the statement.
-    Sqlite(sqlx::Error),
-}
-
-impl fmt::Display for AttachmentError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Sqlite(source) => write!(formatter, "database error: {source}"),
-        }
-    }
-}
-
-impl std::error::Error for AttachmentError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Sqlite(source) => Some(source),
-        }
-    }
-}
-
-impl From<sqlx::Error> for AttachmentError {
-    fn from(source: sqlx::Error) -> Self {
-        Self::Sqlite(source)
-    }
-}
-
 /// Writes attachments to the `attachments` table.
 pub struct AttachmentRepository {
     pool: SqlitePool,
@@ -138,7 +109,7 @@ impl AttachmentRepository {
     /// Must stay in sync with the `attachments` table in `dev/schema.sql`: the column order and the
     /// `UNIQUE (chat_id, message_id)` constraint are what make this statement idempotent. The
     /// `transcribed` flag is written as a literal because nothing sets it yet.
-    pub async fn store(&self, attachment: &NewAttachment) -> Result<StoreOutcome, AttachmentError> {
+    pub async fn store(&self, attachment: &NewAttachment) -> Result<StoreOutcome> {
         let result = sqlx::query(
             "INSERT OR IGNORE INTO attachments \
              (chat_id, message_id, kind, file_id, mime_type, duration_seconds, file_size, transcribed) \
@@ -175,7 +146,7 @@ impl AttachmentRepository {
         kind: AttachmentKind,
         received_since: i64,
         limit: i64,
-    ) -> Result<Vec<PendingAttachment>, AttachmentError> {
+    ) -> Result<Vec<PendingAttachment>> {
         let rows = sqlx::query(
             "SELECT a.id, a.chat_id, a.message_id, a.kind, a.file_id, a.mime_type, a.file_size \
              FROM attachments AS a \
@@ -215,7 +186,7 @@ impl AttachmentRepository {
     /// `transcribed` means "processed: transcribed or deliberately skipped", not "has a transcript":
     /// a row whose chat is not white-listed is marked here too, because leaving it pending would
     /// repeat the same skip on every scan for the length of the window.
-    pub async fn mark_transcribed(&self, id: i64) -> Result<(), AttachmentError> {
+    pub async fn mark_transcribed(&self, id: i64) -> Result<()> {
         sqlx::query("UPDATE attachments SET transcribed = 1 WHERE id = ?")
             .bind(id)
             .execute(&self.pool)

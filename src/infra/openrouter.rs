@@ -13,8 +13,7 @@
 //! calls too, and only this module knows that a call happened. Failures are returned to the caller,
 //! which logs them once with the attachment they belong to.
 
-use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -23,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::infra::config::{VariableName, get_optional};
 use crate::infra::sentry;
+use crate::shared::result::{Error, Result};
 
 /// Model used when [`VariableName::TranscribeModelName`] is unset or empty.
 pub const DEFAULT_TRANSCRIBE_MODEL: &str = "google/gemini-2.5-flash";
@@ -121,79 +121,6 @@ impl AudioFormat {
     }
 }
 
-/// Failure modes of building a client or transcribing audio.
-#[derive(Debug)]
-pub enum OpenRouterError {
-    /// The key or the model is empty after trimming, so the client cannot be used.
-    ///
-    /// Environment configuration cannot reach this: the key arrives through `require_secret`, which
-    /// treats a blank value as missing, and [`model_from_env`] never yields a blank model. The
-    /// check remains for a directly constructed [`OpenRouter`].
-    EmptyConfig { name: VariableName },
-    /// The request could not be sent, or its body could not be read.
-    Request(reqwest::Error),
-    /// OpenRouter answered with a non-success status.
-    Status { status: u16, body: String },
-    /// The audio file could not be read.
-    ReadFile {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    /// The response body is not the JSON shape this module expects.
-    Json(serde_json::Error),
-    /// The response carries no transcript text.
-    NoText,
-}
-
-impl fmt::Display for OpenRouterError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EmptyConfig { name } => write!(formatter, "{name} is empty or only whitespace"),
-            Self::Request(source) => write!(formatter, "OpenRouter request failed: {source}"),
-            Self::Status { status, body } => {
-                write!(formatter, "OpenRouter returned HTTP {status}: {body}")
-            }
-            Self::ReadFile { path, source } => {
-                write!(
-                    formatter,
-                    "failed to read audio file {}: {source}",
-                    path.display()
-                )
-            }
-            Self::Json(source) => {
-                write!(
-                    formatter,
-                    "failed to decode the OpenRouter response: {source}"
-                )
-            }
-            Self::NoText => write!(formatter, "OpenRouter returned no transcript text"),
-        }
-    }
-}
-
-impl std::error::Error for OpenRouterError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Request(source) => Some(source),
-            Self::ReadFile { source, .. } => Some(source),
-            Self::Json(source) => Some(source),
-            Self::EmptyConfig { .. } | Self::Status { .. } | Self::NoText => None,
-        }
-    }
-}
-
-impl From<reqwest::Error> for OpenRouterError {
-    fn from(source: reqwest::Error) -> Self {
-        Self::Request(source)
-    }
-}
-
-impl From<serde_json::Error> for OpenRouterError {
-    fn from(source: serde_json::Error) -> Self {
-        Self::Json(source)
-    }
-}
-
 /// Client for OpenRouter's Chat Completions endpoint.
 pub struct OpenRouter {
     client: reqwest::Client,
@@ -204,20 +131,16 @@ pub struct OpenRouter {
 impl OpenRouter {
     /// Builds a client with a 120-second request timeout.
     ///
-    /// Returns [`OpenRouterError::EmptyConfig`] when the key or the model is empty after trimming,
-    /// so a directly constructed client cannot send a request that is doomed to a 401. Configured
-    /// values never arrive blank: the resolver trims them and treats blank as missing.
-    pub fn new(api_key: String, model: String) -> Result<Self, OpenRouterError> {
+    /// Returns [`Error::EmptyConfiguration`] when the key or the model is empty after trimming, so a
+    /// directly constructed client cannot send a request that is doomed to a 401. Configured values
+    /// never arrive blank: the resolver trims them and treats blank as missing.
+    pub fn new(api_key: String, model: String) -> Result<Self> {
         if api_key.trim().is_empty() {
-            return Err(OpenRouterError::EmptyConfig {
-                name: VariableName::OpenRouterApiKey,
-            });
+            return Err(Error::EmptyConfiguration(VariableName::OpenRouterApiKey));
         }
 
         if model.trim().is_empty() {
-            return Err(OpenRouterError::EmptyConfig {
-                name: VariableName::TranscribeModelName,
-            });
+            return Err(Error::EmptyConfiguration(VariableName::TranscribeModelName));
         }
 
         let client = reqwest::Client::builder().timeout(TIMEOUT).build()?;
@@ -241,7 +164,7 @@ impl OpenRouter {
         path: &Path,
         prompt: &str,
         format: AudioFormat,
-    ) -> Result<String, OpenRouterError> {
+    ) -> Result<String> {
         let started = Instant::now();
         let result = self.request(path, prompt, format).await;
         let elapsed = started.elapsed();
@@ -274,10 +197,10 @@ impl OpenRouter {
         path: &Path,
         prompt: &str,
         format: AudioFormat,
-    ) -> Result<(String, Option<Usage>), OpenRouterError> {
+    ) -> Result<(String, Option<Usage>)> {
         let audio = tokio::fs::read(path)
             .await
-            .map_err(|source| OpenRouterError::ReadFile {
+            .map_err(|source| Error::ReadAudioFile {
                 path: path.to_path_buf(),
                 source,
             })?;
@@ -316,7 +239,7 @@ impl OpenRouter {
         let body = response.text().await?;
 
         if !status.is_success() {
-            return Err(OpenRouterError::Status {
+            return Err(Error::HttpStatus {
                 status: status.as_u16(),
                 body: truncate(&body),
             });
@@ -402,7 +325,7 @@ impl Usage {
 }
 
 /// Reads the transcript and usage out of a successful response body.
-fn parse_response(body: &str) -> Result<(String, Option<Usage>), OpenRouterError> {
+fn parse_response(body: &str) -> Result<(String, Option<Usage>)> {
     let response: Response = serde_json::from_str(body)?;
 
     let text = response
@@ -411,7 +334,7 @@ fn parse_response(body: &str) -> Result<(String, Option<Usage>), OpenRouterError
         .and_then(|choice| choice.message.content.as_deref())
         .map(str::trim)
         .filter(|text| !text.is_empty())
-        .ok_or(OpenRouterError::NoText)?;
+        .ok_or(Error::MissingTranscript)?;
 
     Ok((text.to_owned(), response.usage))
 }
@@ -446,7 +369,7 @@ mod tests {
         for key in ["", "   "] {
             assert!(matches!(
                 OpenRouter::new(key.to_owned(), DEFAULT_TRANSCRIBE_MODEL.to_owned()),
-                Err(OpenRouterError::EmptyConfig { name }) if name == VariableName::OpenRouterApiKey
+                Err(Error::EmptyConfiguration(name)) if name == VariableName::OpenRouterApiKey
             ));
         }
     }
@@ -456,7 +379,7 @@ mod tests {
         for model in ["", "   "] {
             assert!(matches!(
                 OpenRouter::new("key".to_owned(), model.to_owned()),
-                Err(OpenRouterError::EmptyConfig { name }) if name == VariableName::TranscribeModelName
+                Err(Error::EmptyConfiguration(name)) if name == VariableName::TranscribeModelName
             ));
         }
     }
@@ -549,7 +472,7 @@ mod tests {
             r#"{}"#,
         ] {
             assert!(
-                matches!(parse_response(body), Err(OpenRouterError::NoText)),
+                matches!(parse_response(body), Err(Error::MissingTranscript)),
                 "body {body}"
             );
         }
@@ -559,7 +482,7 @@ mod tests {
     fn response_that_is_not_json_is_rejected() {
         assert!(matches!(
             parse_response("<html>bad gateway</html>"),
-            Err(OpenRouterError::Json(_))
+            Err(Error::ResponseJson(_))
         ));
     }
 
@@ -581,14 +504,14 @@ mod tests {
             .await
             .expect_err("missing file should not transcribe");
         match error {
-            OpenRouterError::ReadFile {
+            Error::ReadAudioFile {
                 path: reported,
                 source,
             } => {
                 assert_eq!(reported, path);
                 assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
             }
-            other => panic!("expected ReadFile, got {other}"),
+            other => panic!("expected ReadAudioFile, got {other}"),
         }
     }
 }

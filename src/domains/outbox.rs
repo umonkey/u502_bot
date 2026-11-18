@@ -6,9 +6,9 @@
 //! is escaped Telegram HTML, because the sender posts every row with `ParseMode::Html`.
 //! [`OutboxRepository`] must stay in sync with the `outbox` table in `dev/schema.sql`.
 
-use std::fmt;
-
 use sqlx::{Row, SqlitePool};
+
+use crate::shared::result::Result;
 
 /// One message to write to the `outbox` table.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,35 +36,6 @@ pub struct PendingMessage {
     pub message: String,
 }
 
-/// Failure modes of reading or writing the outbox.
-#[derive(Debug)]
-pub enum OutboxError {
-    /// SQLite rejected the statement.
-    Sqlite(sqlx::Error),
-}
-
-impl fmt::Display for OutboxError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Sqlite(source) => write!(formatter, "database error: {source}"),
-        }
-    }
-}
-
-impl std::error::Error for OutboxError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Sqlite(source) => Some(source),
-        }
-    }
-}
-
-impl From<sqlx::Error> for OutboxError {
-    fn from(source: sqlx::Error) -> Self {
-        Self::Sqlite(source)
-    }
-}
-
 /// Queues and reads the messages waiting to be delivered.
 pub struct OutboxRepository {
     pool: SqlitePool,
@@ -80,7 +51,7 @@ impl OutboxRepository {
     ///
     /// Must stay in sync with the `outbox` table in `dev/schema.sql`: `sent_at` is written as `NULL`
     /// because a queued row is by definition undelivered.
-    pub async fn enqueue(&self, message: &NewOutboxMessage) -> Result<i64, OutboxError> {
+    pub async fn enqueue(&self, message: &NewOutboxMessage) -> Result<i64> {
         let id = sqlx::query_scalar(
             "INSERT INTO outbox (chat_id, thread_id, added_at, sent_at, message) \
              VALUES (?, ?, ?, NULL, ?) RETURNING id",
@@ -96,7 +67,7 @@ impl OutboxRepository {
     }
 
     /// Reads up to `limit` undelivered rows, oldest first.
-    pub async fn pending(&self, limit: i64) -> Result<Vec<PendingMessage>, OutboxError> {
+    pub async fn pending(&self, limit: i64) -> Result<Vec<PendingMessage>> {
         let rows = sqlx::query(
             "SELECT id, chat_id, thread_id, message FROM outbox \
              WHERE sent_at IS NULL ORDER BY id LIMIT ?",
@@ -122,7 +93,7 @@ impl OutboxRepository {
     ///
     /// The `sent_at IS NULL` guard makes a second call for the same row a no-op, so a retry after a
     /// successful delivery cannot rewrite the delivery time.
-    pub async fn mark_sent(&self, id: i64, sent_at: i64) -> Result<(), OutboxError> {
+    pub async fn mark_sent(&self, id: i64, sent_at: i64) -> Result<()> {
         sqlx::query("UPDATE outbox SET sent_at = ? WHERE id = ? AND sent_at IS NULL")
             .bind(sent_at)
             .bind(id)

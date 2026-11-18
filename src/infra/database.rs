@@ -5,15 +5,14 @@
 //! so repositories live in `src/domains/` and domain semantics stay outside this module. The startup
 //! schema is embedded at build time in [`SCHEMA`]; nothing is read from disk at runtime.
 
-use std::fmt;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 use sqlx::{Sqlite, pool::PoolOptions};
 
-use crate::infra::config::{VariableError, VariableName, get_optional};
+use crate::infra::config::{VariableName, require_secret};
+use crate::shared::result::{Error, Result};
 
 /// Startup schema, baked into the binary at build time.
 ///
@@ -21,70 +20,18 @@ use crate::infra::config::{VariableError, VariableName, get_optional};
 /// schema edit requires a rebuild. [`Database::apply_schema`] applies it on every startup.
 pub const SCHEMA: &str = include_str!("../../dev/schema.sql");
 
-/// Failure modes of opening a database or applying its schema.
-#[derive(Debug)]
-pub enum DatabaseError {
-    /// The database path is not set or could not be read.
-    MissingPath(String),
-    /// The directory that should hold the database file could not be created.
-    CreateDir { path: PathBuf, source: io::Error },
-    /// SQLite rejected a connection setting or a statement.
-    Sqlite(sqlx::Error),
-}
-
-impl fmt::Display for DatabaseError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingPath(name) => {
-                write!(formatter, "{name} is not set or could not be read")
-            }
-            Self::CreateDir { path, source } => {
-                write!(
-                    formatter,
-                    "failed to create database directory {}: {source}",
-                    path.display()
-                )
-            }
-            Self::Sqlite(source) => write!(formatter, "database error: {source}"),
-        }
-    }
-}
-
-impl std::error::Error for DatabaseError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::CreateDir { source, .. } => Some(source),
-            Self::Sqlite(source) => Some(source),
-            Self::MissingPath(_) => None,
-        }
-    }
-}
-
-impl From<sqlx::Error> for DatabaseError {
-    fn from(source: sqlx::Error) -> Self {
-        Self::Sqlite(source)
-    }
-}
-
 /// Resolves the database file path from the environment.
 ///
-/// Returns [`DatabaseError::MissingPath`] when [`VariableName::DatabasePath`] is unset, blank, or
-/// unusable: a non-Unicode value, or a `DATABASE_PATH_FILE` that cannot be read or is not UTF-8.
-pub fn database_path() -> Result<PathBuf, DatabaseError> {
-    resolve_database_path(get_optional)
+/// The path is required, so this uses [`require_secret`]: an unset or blank
+/// [`VariableName::DatabasePath`] is an [`Error::MissingVariable`], a value that is not valid
+/// Unicode is an [`Error::VariableNotUnicode`], and a `DATABASE_PATH_FILE` that cannot be read, or is
+/// not UTF-8, is an [`Error::ReadConfiguration`].
+pub fn database_path() -> Result<PathBuf> {
+    resolve_database_path(require_secret)
 }
 
-fn resolve_database_path(
-    lookup: impl Fn(VariableName) -> Result<Option<String>, VariableError>,
-) -> Result<PathBuf, DatabaseError> {
-    match lookup(VariableName::DatabasePath) {
-        Ok(Some(path)) => Ok(PathBuf::from(path)),
-        // An unreadable or non-UTF-8 `DATABASE_PATH_FILE` lands here too: either way there is no
-        // usable path to open.
-        Ok(None) | Err(_) => Err(DatabaseError::MissingPath(
-            VariableName::DatabasePath.to_string(),
-        )),
-    }
+fn resolve_database_path(lookup: impl Fn(VariableName) -> Result<String>) -> Result<PathBuf> {
+    lookup(VariableName::DatabasePath).map(PathBuf::from)
 }
 
 /// A pooled SQLite connection shared with the repositories that own their SQL.
@@ -98,12 +45,12 @@ impl Database {
     /// The connection enables WAL journaling, a five-second busy timeout, and foreign keys. The pool
     /// holds a single connection, which matches SQLite's single-writer reality and keeps in-memory
     /// databases working; the cap can grow when a reader appears.
-    pub async fn connect(path: &Path) -> Result<Self, DatabaseError> {
+    pub async fn connect(path: &Path) -> Result<Self> {
         if let Some(parent) = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
         {
-            std::fs::create_dir_all(parent).map_err(|source| DatabaseError::CreateDir {
+            std::fs::create_dir_all(parent).map_err(|source| Error::CreateDatabaseDirectory {
                 path: parent.to_path_buf(),
                 source,
             })?;
@@ -118,12 +65,12 @@ impl Database {
     }
 
     #[cfg(test)]
-    pub(crate) async fn connect_in_memory() -> Result<Self, DatabaseError> {
+    pub(crate) async fn connect_in_memory() -> Result<Self> {
         Self::open(pool_options(), base_options().in_memory(true)).await
     }
 
     /// Applies the embedded startup schema.
-    pub async fn apply_schema(&self) -> Result<(), DatabaseError> {
+    pub async fn apply_schema(&self) -> Result<()> {
         sqlx::raw_sql(SCHEMA).execute(&self.pool).await?;
 
         Ok(())
@@ -141,10 +88,7 @@ impl Database {
         self.pool.close().await;
     }
 
-    async fn open(
-        pool: PoolOptions<Sqlite>,
-        options: SqliteConnectOptions,
-    ) -> Result<Self, DatabaseError> {
+    async fn open(pool: PoolOptions<Sqlite>, options: SqliteConnectOptions) -> Result<Self> {
         let pool = pool.connect_with(options).await?;
 
         Ok(Self { pool })
@@ -199,16 +143,25 @@ mod tests {
 
     #[tokio::test]
     async fn missing_database_path_is_an_error() {
-        let error = resolve_database_path(|_| Ok(None))
-            .expect_err("missing database path should not resolve");
+        let error = resolve_database_path(|_| {
+            Err(Error::MissingVariable(
+                VariableName::DatabasePath.to_string(),
+            ))
+        })
+        .expect_err("missing database path should not resolve");
         assert!(
-            matches!(error, DatabaseError::MissingPath(name) if name == VariableName::DatabasePath.as_str())
+            matches!(&error, Error::MissingVariable(name) if name == VariableName::DatabasePath.as_str())
+        );
+        assert!(
+            error
+                .to_string()
+                .contains(VariableName::DatabasePath.as_str())
         );
     }
 
     #[tokio::test]
     async fn configured_database_path_is_used_verbatim() {
-        let path = resolve_database_path(|_| Ok(Some("/tmp/u502.sqlite".to_owned())))
+        let path = resolve_database_path(|_| Ok("/tmp/u502.sqlite".to_owned()))
             .expect("configured database path should resolve");
         assert_eq!(path, PathBuf::from("/tmp/u502.sqlite"));
     }
