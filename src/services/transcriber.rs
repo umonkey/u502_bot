@@ -30,7 +30,7 @@ use crate::services::unix_now;
 use crate::shared::result::{Error, Result};
 
 /// Plain-text header placed above the transcript in the first reply.
-const REPLY_HEADER: &str = "Message transcript:";
+const REPLY_HEADER: &str = "Расшифровка:";
 
 /// Only messages at most this old are transcribed, which bounds cost and retries.
 const WINDOW_SECONDS: i64 = 3_600;
@@ -503,7 +503,7 @@ fn escape_html(text: &str) -> String {
 fn reply_html(chunk: &str, first: bool) -> String {
     if first {
         format!(
-            "{REPLY_HEADER}\n\n<blockquote>{}</blockquote>",
+            "{REPLY_HEADER}\n<blockquote>{}</blockquote>",
             escape_html(chunk)
         )
     } else {
@@ -604,7 +604,7 @@ mod tests {
     fn reply_html_renders_the_first_chunk_with_the_header() {
         assert_eq!(
             reply_html("Hello guys I am leaving", true),
-            "Message transcript:\n\n<blockquote>Hello guys I am leaving</blockquote>"
+            "Расшифровка:\n<blockquote>Hello guys I am leaving</blockquote>"
         );
     }
 
@@ -620,7 +620,7 @@ mod tests {
     fn reply_html_renders_a_transcript_containing_markup_inert() {
         assert_eq!(
             reply_html("</blockquote><b>x</b>", true),
-            "Message transcript:\n\n<blockquote>&lt;/blockquote&gt;&lt;b&gt;x&lt;/b&gt;</blockquote>"
+            "Расшифровка:\n<blockquote>&lt;/blockquote&gt;&lt;b&gt;x&lt;/b&gt;</blockquote>"
         );
     }
 
