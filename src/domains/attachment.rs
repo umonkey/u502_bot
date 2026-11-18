@@ -185,16 +185,18 @@ impl AttachmentRepository {
 /// Inserts one row on the caller's connection, so the caller can insert inside its own transaction.
 ///
 /// Must stay in sync with the `attachments` table in `dev/schema.sql`: the column order and the
-/// `UNIQUE (chat_id, message_id)` constraint are what make this statement idempotent. The
-/// `transcribed` flag is written as a literal because nothing sets it here.
+/// `UNIQUE (chat_id, message_id)` constraint are what make this statement idempotent. Naming that
+/// conflict target keeps the redelivery the only silent case, so any other constraint failure
+/// returns an error instead of a false [`InsertOutcome::Duplicate`], which the ingestor would count
+/// as stored. The `transcribed` flag is written as a literal because nothing sets it here.
 pub(crate) async fn insert(
     connection: &mut SqliteConnection,
     attachment: &NewAttachment,
 ) -> Result<InsertOutcome> {
     let result = sqlx::query(
-        "INSERT OR IGNORE INTO attachments \
+        "INSERT INTO attachments \
          (chat_id, message_id, kind, file_id, mime_type, duration_seconds, file_size, transcribed) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0) ON CONFLICT (chat_id, message_id) DO NOTHING",
     )
     .bind(attachment.chat_id)
     .bind(attachment.message_id)
@@ -302,6 +304,41 @@ mod tests {
             .expect("second store should be ignored");
         assert_eq!(first, InsertOutcome::Stored);
         assert_eq!(second, InsertOutcome::Duplicate);
+
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM attachments")
+            .fetch_one(&repository.pool)
+            .await
+            .expect("count should succeed");
+        assert_eq!(rows, 1);
+    }
+
+    #[tokio::test]
+    async fn store_rejects_a_violation_other_than_the_unique_key() {
+        let repository = in_memory_repository().await;
+        // A second unique index models a constraint bug that `INSERT OR IGNORE` swallowed as a
+        // duplicate, hiding the failure from the ingestor, which counts a duplicate as stored.
+        sqlx::query("CREATE UNIQUE INDEX reject_file ON attachments (file_id)")
+            .execute(&repository.pool)
+            .await
+            .expect("index should be created");
+
+        let first = repository
+            .store(&new_attachment())
+            .await
+            .expect("first store should succeed");
+        assert_eq!(first, InsertOutcome::Stored);
+
+        let outcome = repository
+            .store(&NewAttachment {
+                message_id: 8,
+                ..new_attachment()
+            })
+            .await;
+
+        assert!(
+            outcome.is_err(),
+            "a constraint violation other than the unique key should fail the call"
+        );
 
         let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM attachments")
             .fetch_one(&repository.pool)

@@ -105,14 +105,17 @@ impl MessageRepository {
 /// Inserts one row on the caller's connection, so the caller can insert inside its own transaction.
 ///
 /// Must stay in sync with the `messages` table in `dev/schema.sql`: the column order and the
-/// `UNIQUE (chat_id, message_id)` constraint are what make this statement idempotent.
+/// `UNIQUE (chat_id, message_id)` constraint are what make this statement idempotent. Naming that
+/// conflict target keeps the redelivery the only silent case, so any other constraint failure
+/// returns an error instead of a false [`InsertOutcome::Duplicate`], which the ingestor would count
+/// as stored.
 pub(crate) async fn insert(
     connection: &mut SqliteConnection,
     message: &NewMessage,
 ) -> Result<InsertOutcome> {
     let result = sqlx::query(
-        "INSERT OR IGNORE INTO messages (chat_id, message_id, received_at, sender_id, sender_name, message) \
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO messages (chat_id, message_id, received_at, sender_id, sender_name, message) \
+         VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (chat_id, message_id) DO NOTHING",
     )
     .bind(message.chat_id)
     .bind(message.message_id)
@@ -373,6 +376,37 @@ mod tests {
         assert!(outcome.is_err(), "a rejected message should fail the call");
         assert_eq!(count(&repository, "messages").await, 0);
         assert_eq!(count(&repository, "attachments").await, 0);
+    }
+
+    #[tokio::test]
+    async fn store_rejects_a_violation_other_than_the_unique_key() {
+        let repository = in_memory_repository().await;
+        // A second unique index models a constraint bug that `INSERT OR IGNORE` swallowed as a
+        // duplicate, hiding the failure from the ingestor, which counts a duplicate as stored.
+        sqlx::query("CREATE UNIQUE INDEX reject_sender ON messages (sender_name)")
+            .execute(&repository.pool)
+            .await
+            .expect("index should be created");
+
+        repository
+            .store(&new_message(), None)
+            .await
+            .expect("first store should succeed");
+        let outcome = repository
+            .store(
+                &NewMessage {
+                    message_id: 8,
+                    ..new_message()
+                },
+                None,
+            )
+            .await;
+
+        assert!(
+            outcome.is_err(),
+            "a constraint violation other than the unique key should fail the call"
+        );
+        assert_eq!(count(&repository, "messages").await, 1);
     }
 
     #[tokio::test]

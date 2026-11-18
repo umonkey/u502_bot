@@ -10,7 +10,7 @@ One local SQLite database holds everything the bot keeps. There is no external d
 
 ## Duplicates
 
-Incoming messages are unique by `(chat_id, message_id)`, so a redelivery is skipped instead of stored twice. Attachments are keyed by the same pair.
+Incoming messages are unique by `(chat_id, message_id)`, so a redelivery is skipped instead of stored twice. Attachments are keyed by the same pair. Only a conflict on that pair is skipped: any other constraint failure fails the delivery and rolls the transaction back, so it is reported as an error rather than as a repeat.
 
 ### Atomicity
 
