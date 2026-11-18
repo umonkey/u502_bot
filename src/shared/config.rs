@@ -45,6 +45,18 @@ impl VariableName {
             Self::TranscribeModelName => "TRANSCRIBE_MODEL_NAME",
         }
     }
+
+    /// The key that names a file holding this variable's value.
+    pub const fn file_key(self) -> &'static str {
+        match self {
+            Self::TelegramApiToken => "TELEGRAM_API_TOKEN_FILE",
+            Self::SentryDsn => "SENTRY_DSN_FILE",
+            Self::OpenRouterApiKey => "OPENROUTER_API_KEY_FILE",
+            Self::DatabasePath => "DATABASE_PATH_FILE",
+            Self::TranscribeChats => "TRANSCRIBE_CHATS_FILE",
+            Self::TranscribeModelName => "TRANSCRIBE_MODEL_NAME_FILE",
+        }
+    }
 }
 
 impl fmt::Display for VariableName {
@@ -81,6 +93,29 @@ mod tests {
             cases.len(),
             "environment keys should be unique"
         );
+    }
+
+    #[test]
+    fn file_keys_are_the_direct_keys_with_the_suffix() {
+        let names = [
+            VariableName::TelegramApiToken,
+            VariableName::SentryDsn,
+            VariableName::OpenRouterApiKey,
+            VariableName::DatabasePath,
+            VariableName::TranscribeChats,
+            VariableName::TranscribeModelName,
+        ];
+
+        for name in names {
+            assert_eq!(
+                name.file_key(),
+                format!("{}_FILE", name.as_str()),
+                "name {name:?}"
+            );
+        }
+
+        let unique: HashSet<&str> = names.iter().map(|name| name.file_key()).collect();
+        assert_eq!(unique.len(), names.len(), "file keys should be unique");
     }
 
     #[test]

@@ -11,7 +11,7 @@ use std::time::Duration;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 use sqlx::{Sqlite, pool::PoolOptions};
 
-use crate::shared::result::{Error, Result};
+use crate::shared::result::{Error, Operation, Result};
 
 /// Startup schema, baked into the binary at build time.
 ///
@@ -83,7 +83,7 @@ impl Database {
 impl From<sqlx::Error> for Error {
     fn from(source: sqlx::Error) -> Self {
         Self::External {
-            context: "database error",
+            operation: Operation::Database,
             source: Box::new(source),
         }
     }

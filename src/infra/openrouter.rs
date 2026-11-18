@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::infra::sentry;
 use crate::shared::config::VariableName;
-use crate::shared::result::{Error, Result};
+use crate::shared::result::{Error, Operation, Result};
 
 /// Speech-to-Text endpoint.
 const ENDPOINT: &str = "https://openrouter.ai/api/v1/audio/transcriptions";
@@ -198,7 +198,7 @@ impl OpenRouter {
 impl From<reqwest::Error> for Error {
     fn from(source: reqwest::Error) -> Self {
         Self::External {
-            context: "OpenRouter request failed",
+            operation: Operation::OpenRouterRequest,
             source: Box::new(source),
         }
     }
@@ -207,7 +207,7 @@ impl From<reqwest::Error> for Error {
 impl From<serde_json::Error> for Error {
     fn from(source: serde_json::Error) -> Self {
         Self::External {
-            context: "failed to decode the OpenRouter response",
+            operation: Operation::OpenRouterResponse,
             source: Box::new(source),
         }
     }
@@ -398,8 +398,10 @@ mod tests {
             assert!(
                 matches!(
                     parse_response(body),
-                    Err(Error::External { context, .. })
-                        if context == "failed to decode the OpenRouter response"
+                    Err(Error::External {
+                        operation: Operation::OpenRouterResponse,
+                        ..
+                    })
                 ),
                 "body {body}"
             );
@@ -410,8 +412,10 @@ mod tests {
     fn response_that_is_not_json_is_rejected() {
         assert!(matches!(
             parse_response("<html>bad gateway</html>"),
-            Err(Error::External { context, .. })
-                if context == "failed to decode the OpenRouter response"
+            Err(Error::External {
+                operation: Operation::OpenRouterResponse,
+                ..
+            })
         ));
     }
 

@@ -46,10 +46,10 @@ impl Settings {
     }
 
     fn from_lookup(lookup: impl Fn(VariableName) -> Result<Option<String>>) -> Result<Self> {
-        let database_path = required(&lookup, VariableName::DatabasePath)?.into();
+        let database_path = require(&lookup, VariableName::DatabasePath)?.into();
         Ok(Self {
-            telegram_api_token: required(&lookup, VariableName::TelegramApiToken)?,
-            openrouter_api_key: required(&lookup, VariableName::OpenRouterApiKey)?,
+            telegram_api_token: require(&lookup, VariableName::TelegramApiToken)?,
+            openrouter_api_key: require(&lookup, VariableName::OpenRouterApiKey)?,
             transcribe_model: lookup(VariableName::TranscribeModelName)?
                 .unwrap_or_else(|| DEFAULT_TRANSCRIBE_MODEL.to_owned()),
             transcribe_chats: lookup(VariableName::TranscribeChats)?
@@ -75,11 +75,11 @@ fn classify_dsn(value: Result<Option<String>>) -> SentryDsn {
 }
 
 /// Resolves a setting startup cannot run without.
-fn required(
+fn require(
     lookup: &impl Fn(VariableName) -> Result<Option<String>>,
     name: VariableName,
 ) -> Result<String> {
-    lookup(name)?.ok_or_else(|| Error::MissingVariable(name.as_str().to_owned()))
+    lookup(name)?.ok_or(Error::MissingVariable(name))
 }
 
 /// The chats whose audio and video are transcribed.
@@ -132,27 +132,29 @@ impl Whitelist {
 /// a non-Unicode variable, or a `NAME_FILE` path that cannot be read or is not UTF-8. See the
 /// module documentation for the precedence and the trimming rule.
 fn get_optional(name: VariableName) -> Result<Option<String>> {
-    resolve(name.as_str(), |key| std::env::var(key), read_file)
+    resolve(name, |key| std::env::var(key), read_file)
 }
 
 /// The one algorithm behind [`get_optional`], with the lookups injected so tests need not touch the
 /// process environment.
 fn resolve(
-    name: &str,
+    name: VariableName,
     lookup: impl Fn(&str) -> Result<String, VarError>,
     read_file: impl Fn(&str) -> Result<String>,
 ) -> Result<Option<String>> {
-    let file_key = format!("{name}_FILE");
-    let raw = match lookup(&file_key) {
+    let file_key = name.file_key();
+    let raw = match lookup(file_key) {
         Ok(path) => read_file(&path)?,
-        Err(VarError::NotPresent) => match lookup(name) {
+        Err(VarError::NotPresent) => match lookup(name.as_str()) {
             Ok(value) => value,
             Err(VarError::NotPresent) => return Ok(None),
             Err(VarError::NotUnicode(_)) => {
-                return Err(Error::VariableNotUnicode(name.to_owned()));
+                return Err(Error::VariableNotUnicode(name));
             }
         },
-        Err(VarError::NotUnicode(_)) => return Err(Error::VariableNotUnicode(file_key)),
+        Err(VarError::NotUnicode(_)) => {
+            return Err(Error::VariableNotUnicode(name));
+        }
     };
 
     let trimmed = raw.trim();
@@ -231,7 +233,7 @@ mod tests {
 
         assert!(matches!(
             settings_error(&values),
-            Error::MissingVariable(name) if name == "TELEGRAM_API_TOKEN"
+            Error::MissingVariable(VariableName::TelegramApiToken)
         ));
     }
 
@@ -244,7 +246,7 @@ mod tests {
 
         assert!(matches!(
             settings_error(&values),
-            Error::MissingVariable(name) if name == "OPENROUTER_API_KEY"
+            Error::MissingVariable(VariableName::OpenRouterApiKey)
         ));
     }
 
@@ -257,7 +259,7 @@ mod tests {
 
         assert!(matches!(
             settings_error(&values),
-            Error::MissingVariable(name) if name == "DATABASE_PATH"
+            Error::MissingVariable(VariableName::DatabasePath)
         ));
     }
 
@@ -289,7 +291,7 @@ mod tests {
     fn an_unusable_optional_value_fails() {
         let error = match Settings::from_lookup(|name| {
             if name == VariableName::TranscribeModelName {
-                Err(Error::VariableNotUnicode(name.as_str().to_owned()))
+                Err(Error::VariableNotUnicode(name))
             } else {
                 Ok(Some("value".to_owned()))
             }
@@ -300,7 +302,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            Error::VariableNotUnicode(name) if name == "TRANSCRIBE_MODEL_NAME"
+            Error::VariableNotUnicode(VariableName::TranscribeModelName)
         ));
     }
 
@@ -399,18 +401,20 @@ mod tests {
 
     #[test]
     fn missing_error_names_both_forms() {
-        let message = Error::MissingVariable("TOKEN".to_owned()).to_string();
+        let name = VariableName::TelegramApiToken;
+        let message = Error::MissingVariable(name).to_string();
 
-        assert!(message.contains("TOKEN"), "message {message:?}");
-        assert!(message.contains("TOKEN_FILE"), "message {message:?}");
+        assert!(message.contains(name.as_str()), "message {message:?}");
+        assert!(message.contains(name.file_key()), "message {message:?}");
         assert!(!message.contains("secret"), "message {message:?}");
     }
 
     #[test]
     fn not_unicode_error_names_the_variable() {
-        let message = Error::VariableNotUnicode("TOKEN".to_owned()).to_string();
+        let name = VariableName::TelegramApiToken;
+        let message = Error::VariableNotUnicode(name).to_string();
 
-        assert_eq!(message, "TOKEN is not valid Unicode");
+        assert_eq!(message, format!("{} is not valid Unicode", name.as_str()));
     }
 
     #[test]
@@ -429,20 +433,21 @@ mod tests {
     #[test]
     fn direct_value_resolves_when_no_file_variable_is_set() {
         let lookup = |key: &str| match key {
-            "TOKEN" => Ok("direct".to_owned()),
+            "TELEGRAM_API_TOKEN" => Ok("direct".to_owned()),
             _ => Err(VarError::NotPresent),
         };
-        let read_file = |_: &str| panic!("no file should be read without TOKEN_FILE");
+        let read_file = |_: &str| panic!("no file should be read without TELEGRAM_API_TOKEN_FILE");
 
-        let value = resolve("TOKEN", lookup, read_file).expect("direct value should resolve");
+        let value = resolve(VariableName::TelegramApiToken, lookup, read_file)
+            .expect("direct value should resolve");
         assert_eq!(value, Some("direct".to_owned()));
     }
 
     #[test]
     fn file_variant_takes_precedence_when_both_are_set() {
         let lookup = |key: &str| match key {
-            "TOKEN_FILE" => Ok("/run/secrets/token".to_owned()),
-            "TOKEN" => Ok("direct".to_owned()),
+            "TELEGRAM_API_TOKEN_FILE" => Ok("/run/secrets/token".to_owned()),
+            "TELEGRAM_API_TOKEN" => Ok("direct".to_owned()),
             _ => Err(VarError::NotPresent),
         };
         let read_file = |path: &str| {
@@ -450,50 +455,54 @@ mod tests {
             Ok("from-file".to_owned())
         };
 
-        let value = resolve("TOKEN", lookup, read_file).expect("file value should resolve");
+        let value = resolve(VariableName::TelegramApiToken, lookup, read_file)
+            .expect("file value should resolve");
         assert_eq!(value, Some("from-file".to_owned()));
     }
 
     #[test]
     fn both_sources_are_trimmed() {
         let from_file = |key: &str| match key {
-            "TOKEN_FILE" => Ok("/run/secrets/token".to_owned()),
+            "TELEGRAM_API_TOKEN_FILE" => Ok("/run/secrets/token".to_owned()),
             _ => Err(VarError::NotPresent),
         };
         let read_file = |_: &str| Ok(" from-file \n".to_owned());
-        let value = resolve("TOKEN", from_file, read_file).expect("file value should resolve");
+        let value = resolve(VariableName::TelegramApiToken, from_file, read_file)
+            .expect("file value should resolve");
         assert_eq!(value, Some("from-file".to_owned()));
 
         let direct = |key: &str| match key {
-            "TOKEN" => Ok("\t direct value \r\n".to_owned()),
+            "TELEGRAM_API_TOKEN" => Ok("\t direct value \r\n".to_owned()),
             _ => Err(VarError::NotPresent),
         };
-        let read_file = |_: &str| panic!("no file should be read without TOKEN_FILE");
-        let value = resolve("TOKEN", direct, read_file).expect("direct value should resolve");
+        let read_file = |_: &str| panic!("no file should be read without TELEGRAM_API_TOKEN_FILE");
+        let value = resolve(VariableName::TelegramApiToken, direct, read_file)
+            .expect("direct value should resolve");
         assert_eq!(value, Some("direct value".to_owned()));
     }
 
     #[test]
     fn whitespace_only_values_mean_unset() {
         let from_file = |key: &str| match key {
-            "TOKEN_FILE" => Ok("/run/secrets/token".to_owned()),
+            "TELEGRAM_API_TOKEN_FILE" => Ok("/run/secrets/token".to_owned()),
             _ => Err(VarError::NotPresent),
         };
         for contents in ["", "   ", "\n\t\r\n"] {
             let read_file = |_: &str| Ok(contents.to_owned());
-            let value = resolve("TOKEN", from_file, read_file)
+            let value = resolve(VariableName::TelegramApiToken, from_file, read_file)
                 .expect("a blank file should not be an error");
             assert_eq!(value, None, "contents {contents:?}");
         }
 
         for value in ["", "   ", "\n\t"] {
             let direct = |key: &str| match key {
-                "TOKEN" => Ok(value.to_owned()),
+                "TELEGRAM_API_TOKEN" => Ok(value.to_owned()),
                 _ => Err(VarError::NotPresent),
             };
-            let read_file = |_: &str| panic!("no file should be read without TOKEN_FILE");
-            let resolved =
-                resolve("TOKEN", direct, read_file).expect("a blank value should not be an error");
+            let read_file =
+                |_: &str| panic!("no file should be read without TELEGRAM_API_TOKEN_FILE");
+            let resolved = resolve(VariableName::TelegramApiToken, direct, read_file)
+                .expect("a blank value should not be an error");
             assert_eq!(resolved, None, "value {value:?}");
         }
     }
@@ -503,15 +512,15 @@ mod tests {
         let lookup = |_: &str| Err::<String, VarError>(VarError::NotPresent);
         let read_file = |_: &str| panic!("no file should be read with neither variable set");
 
-        let value =
-            resolve("TOKEN", lookup, read_file).expect("an absent variable should not be an error");
+        let value = resolve(VariableName::TelegramApiToken, lookup, read_file)
+            .expect("an absent variable should not be an error");
         assert_eq!(value, None);
     }
 
     #[test]
     fn unreadable_file_is_reported() {
         let lookup = |key: &str| match key {
-            "TOKEN_FILE" => Ok("/run/secrets/missing".to_owned()),
+            "TELEGRAM_API_TOKEN_FILE" => Ok("/run/secrets/missing".to_owned()),
             _ => Err(VarError::NotPresent),
         };
         let read_file = |_: &str| {
@@ -521,8 +530,8 @@ mod tests {
             })
         };
 
-        let error =
-            resolve("TOKEN", lookup, read_file).expect_err("unreadable file should not resolve");
+        let error = resolve(VariableName::TelegramApiToken, lookup, read_file)
+            .expect_err("unreadable file should not resolve");
         match error {
             Error::ReadConfiguration { path, source } => {
                 assert_eq!(path, PathBuf::from("/run/secrets/missing"));
@@ -535,23 +544,29 @@ mod tests {
     #[test]
     fn non_unicode_variable_is_reported() {
         let file_lookup = |key: &str| match key {
-            "TOKEN_FILE" => Err(VarError::NotUnicode(OsString::from("\u{fffd}"))),
+            "TELEGRAM_API_TOKEN_FILE" => Err(VarError::NotUnicode(OsString::from("\u{fffd}"))),
             _ => Err(VarError::NotPresent),
         };
         let read_file = |_: &str| panic!("non-Unicode path cannot be read");
-        let error = resolve("TOKEN", file_lookup, read_file)
+        let error = resolve(VariableName::TelegramApiToken, file_lookup, read_file)
             .expect_err("non-Unicode file variable should not resolve");
-        assert!(matches!(error, Error::VariableNotUnicode(name) if name == "TOKEN_FILE"));
+        assert!(matches!(
+            error,
+            Error::VariableNotUnicode(VariableName::TelegramApiToken)
+        ));
 
         let direct_lookup = |key: &str| match key {
-            "TOKEN_FILE" => Err(VarError::NotPresent),
-            "TOKEN" => Err(VarError::NotUnicode(OsString::from("\u{fffd}"))),
+            "TELEGRAM_API_TOKEN_FILE" => Err(VarError::NotPresent),
+            "TELEGRAM_API_TOKEN" => Err(VarError::NotUnicode(OsString::from("\u{fffd}"))),
             _ => Err(VarError::NotPresent),
         };
-        let read_file = |_: &str| panic!("no file should be read without TOKEN_FILE");
-        let error = resolve("TOKEN", direct_lookup, read_file)
+        let read_file = |_: &str| panic!("no file should be read without TELEGRAM_API_TOKEN_FILE");
+        let error = resolve(VariableName::TelegramApiToken, direct_lookup, read_file)
             .expect_err("non-Unicode direct variable should not resolve");
-        assert!(matches!(error, Error::VariableNotUnicode(name) if name == "TOKEN"));
+        assert!(matches!(
+            error,
+            Error::VariableNotUnicode(VariableName::TelegramApiToken)
+        ));
     }
 
     #[test]

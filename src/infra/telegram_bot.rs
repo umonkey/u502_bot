@@ -17,7 +17,7 @@ use teloxide::types::{FileId, MessageId, ParseMode, ReactionType, ReplyParameter
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::shared::result::{Error, Result};
+use crate::shared::result::{Error, Operation, Result};
 
 /// How long [`Messages::stop`] waits for the dispatcher task before giving up.
 const DISPATCHER_STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -173,7 +173,7 @@ impl Telegram {
 impl From<teloxide::RequestError> for Error {
     fn from(source: teloxide::RequestError) -> Self {
         Self::External {
-            context: "telegram request error",
+            operation: Operation::TelegramRequest,
             source: Box::new(source),
         }
     }
@@ -182,7 +182,7 @@ impl From<teloxide::RequestError> for Error {
 impl From<teloxide::DownloadError> for Error {
     fn from(source: teloxide::DownloadError) -> Self {
         Self::External {
-            context: "telegram download error",
+            operation: Operation::TelegramDownload,
             source: Box::new(source),
         }
     }

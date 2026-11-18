@@ -8,8 +8,9 @@
 //! above each group names the area.
 //!
 //! A failure of an external client is carried by the one [`Error::External`] variant, whose
-//! `context` says what was being done and whose `source` keeps the cause, so this file names no
+//! `operation` says what was being done and whose `source` keeps the cause, so this file names no
 //! integration crate. Each `From` conversion lives in the module that owns the client producing it.
+//! Configuration failures carry the [`VariableName`] that failed and render its key.
 
 use std::fmt;
 use std::io;
@@ -20,14 +21,41 @@ use crate::shared::config::VariableName;
 /// Every result in this crate.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+/// What an external client was being asked to do when it failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Operation {
+    /// A database statement or connection.
+    Database,
+    /// A Telegram Bot API request.
+    TelegramRequest,
+    /// A Telegram file download.
+    TelegramDownload,
+    /// A request to OpenRouter.
+    OpenRouterRequest,
+    /// Decoding the body OpenRouter answered with.
+    OpenRouterResponse,
+}
+
+impl fmt::Display for Operation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Database => "database operation failed",
+            Self::TelegramRequest => "Telegram request failed",
+            Self::TelegramDownload => "Telegram download failed",
+            Self::OpenRouterRequest => "OpenRouter request failed",
+            Self::OpenRouterResponse => "failed to decode the OpenRouter response",
+        })
+    }
+}
+
 /// Every failure mode the bot can produce.
 #[derive(Debug)]
 pub enum Error {
     // Configuration
     /// Neither `NAME_FILE` nor `NAME` is set, or the value is blank.
-    MissingVariable(String),
-    /// A variable, or the name in `NAME_FILE`, is not valid Unicode.
-    VariableNotUnicode(String),
+    MissingVariable(VariableName),
+    /// The value of `NAME` or `NAME_FILE` is not valid Unicode.
+    VariableNotUnicode(VariableName),
     /// A file named by `NAME_FILE` could not be read or is not UTF-8.
     ReadConfiguration { path: PathBuf, source: io::Error },
     /// A configured value that must not be blank is blank.
@@ -36,9 +64,9 @@ pub enum Error {
     InvalidChatId(String),
 
     // External clients
-    /// A call failed; `context` names what was being done, and `source` keeps the cause.
+    /// A call failed; `operation` names what was being done, and `source` keeps the cause.
     External {
-        context: &'static str,
+        operation: Operation,
         source: Box<dyn std::error::Error + Send + Sync>,
     },
 
@@ -53,7 +81,7 @@ pub enum Error {
     MessageIdOutOfRange(i64),
 
     // OpenRouter
-    /// OpenRouter answered with a non-success status.
+    /// An HTTP request returned a non-success status.
     HttpStatus { status: u16, body: String },
     /// The audio file could not be read.
     ReadAudioFile { path: PathBuf, source: io::Error },
@@ -77,10 +105,13 @@ impl fmt::Display for Error {
             Self::MissingVariable(name) => {
                 write!(
                     formatter,
-                    "{name} is not set: neither {name}_FILE nor {name} exists"
+                    "{name} is not set: neither {} nor {name} exists",
+                    name.file_key()
                 )
             }
-            Self::VariableNotUnicode(name) => write!(formatter, "{name} is not valid Unicode"),
+            Self::VariableNotUnicode(name) => {
+                write!(formatter, "{name} is not valid Unicode")
+            }
             Self::ReadConfiguration { path, source } => {
                 write!(formatter, "failed to read {}: {source}", path.display())
             }
@@ -92,7 +123,7 @@ impl fmt::Display for Error {
                 "{} entry {token:?} is not a numeric chat id",
                 VariableName::TranscribeChats
             ),
-            Self::External { context, source } => write!(formatter, "{context}: {source}"),
+            Self::External { operation, source } => write!(formatter, "{operation}: {source}"),
             Self::CreateDatabaseDirectory { path, source } => {
                 write!(
                     formatter,
@@ -110,7 +141,10 @@ impl fmt::Display for Error {
                 )
             }
             Self::HttpStatus { status, body } => {
-                write!(formatter, "OpenRouter returned HTTP {status}: {body}")
+                write!(
+                    formatter,
+                    "HTTP request failed with status {status}: {body}"
+                )
             }
             Self::ReadAudioFile { path, source } => {
                 write!(
@@ -164,11 +198,13 @@ impl std::error::Error for Error {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     #[test]
     fn missing_variable_names_both_forms() {
-        let error = Error::MissingVariable(VariableName::DatabasePath.as_str().to_owned());
+        let error = Error::MissingVariable(VariableName::DatabasePath);
 
         assert_eq!(
             error.to_string(),
@@ -189,24 +225,43 @@ mod tests {
     #[test]
     fn database_error_names_the_cause() {
         let error = Error::External {
-            context: "database error",
+            operation: Operation::Database,
             source: Box::new(io::Error::other("no rows returned")),
         };
-        let rendered = error.to_string();
 
-        assert!(rendered.starts_with("database error: "), "{rendered}");
-        assert!(rendered.contains("no rows returned"), "{rendered}");
+        assert_eq!(
+            error.to_string(),
+            "database operation failed: no rows returned"
+        );
     }
 
     #[test]
     fn wrapped_sources_are_exposed() {
         let wrapped = Error::External {
-            context: "database error",
+            operation: Operation::Database,
             source: Box::new(io::Error::other("no rows returned")),
         };
-        let plain = Error::MissingVariable(VariableName::DatabasePath.as_str().to_owned());
+        let plain = Error::MissingVariable(VariableName::DatabasePath);
 
         assert!(std::error::Error::source(&wrapped).is_some());
         assert!(std::error::Error::source(&plain).is_none());
+    }
+
+    #[test]
+    fn each_operation_renders_a_distinct_message() {
+        let operations = [
+            Operation::Database,
+            Operation::TelegramRequest,
+            Operation::TelegramDownload,
+            Operation::OpenRouterRequest,
+            Operation::OpenRouterResponse,
+        ];
+        let messages: HashSet<String> = operations
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+
+        assert_eq!(messages.len(), operations.len());
+        assert!(messages.iter().all(|message| !message.is_empty()));
     }
 }

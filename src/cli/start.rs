@@ -22,10 +22,10 @@ use crate::services::outbox::Outbox;
 use crate::services::shutdown::Shutdown;
 use crate::services::transcriber::Transcriber;
 use crate::services::wake::Wake;
-use crate::shared::result::{Error, Result};
+use crate::shared::result::Result;
 
 pub async fn run() -> ExitCode {
-    let settings = context(Settings::load(), "Failed to load the configuration");
+    let settings = Settings::load();
 
     // Configuration is loaded before the subscriber exists, so the DSN comes from the settings when
     // they load and is resolved once more, best effort, when they do not.
@@ -63,10 +63,7 @@ async fn start(settings: Settings) -> Result<()> {
     let shutdown = Shutdown::new();
     let _signals = tokio::spawn(watch_for_shutdown(shutdown.clone()));
 
-    let database = context(
-        init_database(&settings.database_path).await,
-        "Failed to open the database",
-    )?;
+    let database = init_database(&settings.database_path).await?;
 
     if settings.transcribe_chats.is_empty() {
         tracing::warn!(
@@ -85,14 +82,8 @@ async fn start(settings: Settings) -> Result<()> {
         );
     }
 
-    let openrouter = context(
-        OpenRouter::new(settings.openrouter_api_key, settings.transcribe_model),
-        "Failed to build the OpenRouter client",
-    )?;
-    let telegram = context(
-        Telegram::connect(settings.telegram_api_token).await,
-        "Failed to start the Telegram bot",
-    )?;
+    let openrouter = OpenRouter::new(settings.openrouter_api_key, settings.transcribe_model)?;
+    let telegram = Telegram::connect(settings.telegram_api_token).await?;
 
     let pool = database.pool().clone();
 
@@ -157,14 +148,6 @@ async fn init_database(path: &Path) -> Result<database::Database> {
     Ok(database)
 }
 
-/// Names the startup step that failed, so the one log line still says where it failed.
-fn context<T>(result: Result<T>, message: &'static str) -> Result<T> {
-    result.map_err(|error| Error::External {
-        context: message,
-        source: Box::new(error),
-    })
-}
-
 /// Logs a service task that returned or panicked; the other two keep running unless shutdown was
 /// requested.
 fn log_service_exit(
@@ -183,25 +166,5 @@ fn log_service_exit(
             error = &error as &dyn std::error::Error,
             "A service panicked; the remaining services keep running"
         ),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn context_names_the_step_and_keeps_the_cause() {
-        let error = context(
-            Err::<(), _>(Error::MissingVariable("DATABASE_PATH".to_owned())),
-            "Failed to open the database",
-        )
-        .expect_err("a failed step stays a failure");
-
-        assert_eq!(
-            error.to_string(),
-            "Failed to open the database: DATABASE_PATH is not set: neither DATABASE_PATH_FILE nor DATABASE_PATH exists"
-        );
-        assert!(std::error::Error::source(&error).is_some());
     }
 }

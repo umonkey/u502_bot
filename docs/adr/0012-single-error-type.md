@@ -18,20 +18,25 @@ failure keeps its identity as it crosses layers. Library failures with one obvio
 converted once; failures that need context, such as input and output errors, are translated where
 they happen, so the message names what failed. No dependency is added for this.
 
-A transport failure that no caller acts on is carried by `External`, whose `context` names the
-operation. A failure a caller must act on gets its own variant even when it is specific to one
+A transport failure that no caller acts on is carried by `External`, whose `operation` is an
+`Operation` value naming what was being done and whose `source` keeps the cause, so no caller or test
+compares text. A failure a caller must act on gets its own variant even when it is specific to one
 integration; the current set is `HttpStatus`, `ReadAudioFile`, `MessageIdOutOfRange`,
-`FfmpegUnavailable`, `FfmpegStatus`, `FfmpegIo`, `NoAudioStream`, and `FfmpegTimeout`. Each `From`
-conversion lives in the module that owns the client producing it.
+`FfmpegUnavailable`, `FfmpegStatus`, `FfmpegIo`, `NoAudioStream`, and `FfmpegTimeout`. Configuration
+failures carry the `VariableName` that failed, and the key text is rendered from that enum. Each
+`From` conversion lives in the module that owns the client producing it.
 
 ## Consequences
 
 - every fallible signature reads the same, and no module exports an error type of its own
 - adding a failure is one entry and one message in one place
 - a caller can name and act on the semantic failures, which are the ones that drive behaviour; a
-  transport failure is one `External` variant, matched on its context
-- `External::context` is a `&'static str`, so a caller distinguishes one client failure from another
-  by string; the tests do the same
+  transport failure is one `External` variant
+- `External::operation` is a closed `Operation` enum, so a caller and a test tell one client failure
+  from another by matching a variant, and the rendered message comes from the same variant, so the
+  two cannot drift
+- configuration failures carry `VariableName`, so a test asserts the variable by matching the variant
+  and the key text is rendered from the enum
 - the shared enum names no integration crate, so a dependency upgrade does not force a rename, but a
   new failure mode does add a variant
 - adding an integration puts its conversions beside the client and adds its semantic failures to the
