@@ -21,10 +21,14 @@ use crate::domains::outbox::{NewOutboxMessage, OutboxError, OutboxRepository};
 use crate::infra::openrouter::OpenRouter;
 use crate::infra::sentry;
 use crate::infra::telegram_bot::Telegram;
+use crate::services::shutdown::Shutdown;
 use crate::services::unix_now;
 
 /// Instruction sent with every file; it asks for a verbatim transcript and nothing else.
 const TRANSCRIPTION_PROMPT: &str = "Transcribe this voice message verbatim in the language it is spoken. Return only the transcript: no commentary, no timestamps, no speaker labels, no translation. If there is no speech, return an empty string.";
+
+/// Plain-text header placed above the transcript in the first reply.
+const REPLY_HEADER: &str = "Message transcript:";
 
 /// Environment variable holding the comma-separated list of chats to transcribe.
 const TRANSCRIBE_CHATS: &str = "TRANSCRIBE_CHATS";
@@ -38,7 +42,11 @@ const BATCH: i64 = 10;
 /// Pause after a scan that found nothing, or that could not do any work.
 const IDLE: Duration = Duration::from_secs(5);
 
-/// Maximum characters per outbox row: Telegram rejects a message longer than 4096.
+/// Maximum visible characters per outbox row: Telegram rejects a message longer than 4096.
+///
+/// The limit budgets the text Telegram counts after entity parsing, not the markup, so chunking
+/// stays on the raw transcript and escaping is applied per chunk, where a chunk boundary can never
+/// split a tag.
 const CHUNK_LIMIT: usize = 4_000;
 
 /// The chats whose audio is transcribed.
@@ -155,21 +163,24 @@ impl Transcriber {
         }
     }
 
-    /// Transcribes pending audio forever, pausing only when there is nothing to do.
-    pub async fn run(self) {
-        loop {
-            if !self.tick().await {
-                tokio::time::sleep(IDLE).await;
+    /// Transcribes pending audio until shutdown is requested, pausing only when there is nothing to
+    /// do.
+    pub async fn run(self, mut shutdown: Shutdown) {
+        while !shutdown.is_requested() {
+            if !self.tick(&mut shutdown).await && !shutdown.sleep(IDLE).await {
+                break;
             }
         }
+
+        tracing::info!("Stopped the transcriber");
     }
 
     /// Processes one batch and returns whether any attachment was finished.
     ///
-    /// A failed scan sleeps here rather than returning: the pool is shared with the ingestor, and a
-    /// failed read must not spin. A batch in which every row failed returns `false`, so a file that
-    /// keeps failing is retried once per [`IDLE`] instead of as fast as the failure returns.
-    async fn tick(&self) -> bool {
+    /// The pause lives in the caller, where it is interruptible: a failed scan and a batch in which
+    /// every row failed both return `false`, so a file that keeps failing or a pool that rejects a
+    /// read is retried once per [`IDLE`] instead of as fast as the failure returns.
+    async fn tick(&self, shutdown: &mut Shutdown) -> bool {
         let now = unix_now();
         let pending = match self
             .attachments
@@ -182,7 +193,6 @@ impl Transcriber {
                     error = &error as &dyn std::error::Error,
                     "Failed to scan for pending audio"
                 );
-                tokio::time::sleep(IDLE).await;
 
                 return false;
             }
@@ -191,7 +201,11 @@ impl Transcriber {
         let mut processed = false;
 
         for attachment in pending {
-            processed |= self.process(attachment, now).await;
+            if shutdown.is_requested() {
+                break;
+            }
+
+            processed |= self.process(attachment, now, shutdown).await;
         }
 
         processed
@@ -201,7 +215,9 @@ impl Transcriber {
     ///
     /// No database transaction spans the download or the LLM call: each statement returns the pooled
     /// connection immediately, so holding one would stall the ingestor for the length of the call.
-    async fn process(&self, attachment: PendingAudio, now: i64) -> bool {
+    /// A shutdown interrupts either call by dropping it; the attachment stays pending and is retried
+    /// on the next start, while the writes that follow are never cancelled.
+    async fn process(&self, attachment: PendingAudio, now: i64, shutdown: &mut Shutdown) -> bool {
         if !self.chats.contains(attachment.chat_id) {
             tracing::warn!(
                 chat_id = attachment.chat_id,
@@ -222,17 +238,21 @@ impl Transcriber {
         };
         let path = directory.path().join("audio");
 
-        if let Err(error) = self.telegram.download(&attachment.file_id, &path).await {
+        let downloaded = tokio::select! {
+            result = self.telegram.download(&attachment.file_id, &path) => result,
+            () = shutdown.wait() => return false,
+        };
+        if let Err(error) = downloaded {
             log_failure(&attachment, &error);
 
             return false;
         }
 
-        let transcript = match self
-            .openrouter
-            .transcribe_audio(&path, TRANSCRIPTION_PROMPT)
-            .await
-        {
+        let transcribed = tokio::select! {
+            result = self.openrouter.transcribe_audio(&path, TRANSCRIPTION_PROMPT) => result,
+            () = shutdown.wait() => return false,
+        };
+        let transcript = match transcribed {
             Ok(transcript) => transcript,
             Err(error) => {
                 log_failure(&attachment, &error);
@@ -276,7 +296,7 @@ impl Transcriber {
                 chat_id: attachment.chat_id,
                 thread_id: (index == 0).then_some(attachment.message_id),
                 added_at: now,
-                message: chunk.to_owned(),
+                message: reply_html(chunk, index == 0),
             };
 
             self.outbox.enqueue(&message).await?;
@@ -316,6 +336,31 @@ fn log_failure(attachment: &PendingAudio, error: &(dyn std::error::Error + 'stat
         error = error,
         "Failed to process an audio attachment"
     );
+}
+
+/// Escapes the characters Telegram's HTML parse mode treats as markup.
+///
+/// The ampersand is replaced first, so the entities introduced by the later replacements are not
+/// escaped twice. Everything else is left untouched.
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Renders one chunk as Telegram HTML: the header above the transcript, the transcript quoted.
+///
+/// Only the first chunk carries [`REPLY_HEADER`]; the rest are the bare blockquote. The transcript
+/// is escaped, so its content can never inject markup.
+fn reply_html(chunk: &str, first: bool) -> String {
+    if first {
+        format!(
+            "{REPLY_HEADER}\n\n<blockquote>{}</blockquote>",
+            escape_html(chunk)
+        )
+    } else {
+        format!("<blockquote>{}</blockquote>", escape_html(chunk))
+    }
 }
 
 /// Splits `text` into pieces of at most `limit` bytes without cutting a character in half.
@@ -387,6 +432,43 @@ mod tests {
             Err(WhitelistError::NotANumber(token)) => assert_eq!(token, "two"),
             other => panic!("expected a non-numeric entry, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn escape_html_escapes_markup_characters() {
+        assert_eq!(escape_html("&"), "&amp;");
+        assert_eq!(escape_html("<"), "&lt;");
+        assert_eq!(escape_html(">"), "&gt;");
+    }
+
+    #[test]
+    fn escape_html_escapes_the_ampersand_first() {
+        assert_eq!(escape_html("a & b < c > d"), "a &amp; b &lt; c &gt; d");
+        assert_eq!(escape_html("&lt;"), "&amp;lt;");
+    }
+
+    #[test]
+    fn reply_html_renders_the_first_chunk_with_the_header() {
+        assert_eq!(
+            reply_html("Hello guys I am leaving", true),
+            "Message transcript:\n\n<blockquote>Hello guys I am leaving</blockquote>"
+        );
+    }
+
+    #[test]
+    fn reply_html_renders_a_continuation_chunk_without_the_header() {
+        assert_eq!(
+            reply_html("and another thing", false),
+            "<blockquote>and another thing</blockquote>"
+        );
+    }
+
+    #[test]
+    fn reply_html_renders_a_transcript_containing_markup_inert() {
+        assert_eq!(
+            reply_html("</blockquote><b>x</b>", true),
+            "Message transcript:\n\n<blockquote>&lt;/blockquote&gt;&lt;b&gt;x&lt;/b&gt;</blockquote>"
+        );
     }
 
     #[test]

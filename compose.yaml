@@ -3,6 +3,9 @@ services:
     build: .
     image: ghcr.io/umonkey/u502_bot:latest
     restart: unless-stopped
+    # The bot stops polling, stores what it already received, closes the database, and flushes
+    # Sentry before exiting; 20s leaves room for that without delaying a restart much.
+    stop_grace_period: 20s
     environment:
       RUST_LOG: ${RUST_LOG:-info}
       TELEGRAM_API_TOKEN_FILE: /run/secrets/telegram_api_token

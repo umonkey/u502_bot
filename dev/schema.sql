@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS outbox (
     thread_id INTEGER,        -- Telegram message id the reply answers; NULL for a plain message
     added_at INTEGER NOT NULL, -- Unix time in seconds, UTC
     sent_at INTEGER,          -- Unix time in seconds, UTC; NULL while unsent
-    message TEXT NOT NULL
+    message TEXT NOT NULL     -- escaped Telegram HTML, rendered by the producer
 );
 
 CREATE INDEX IF NOT EXISTS outbox_pending ON outbox (id) WHERE sent_at IS NULL;

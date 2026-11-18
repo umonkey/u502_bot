@@ -7,22 +7,65 @@
 
 use std::fmt;
 use std::path::Path;
+use std::time::Duration;
 
+use teloxide::dispatching::ShutdownToken;
 use teloxide::dptree;
 use teloxide::net::Download;
 use teloxide::prelude::*;
-use teloxide::types::{FileId, MessageId, ReplyParameters};
+use teloxide::types::{FileId, MessageId, ParseMode, ReplyParameters};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+
+/// How long [`Messages::stop`] waits for the dispatcher task before giving up.
+const DISPATCHER_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Handle over the messages the Telegram dispatcher delivers.
 pub struct Messages {
     receiver: mpsc::Receiver<Message>,
+    poller: Poller,
+}
+
+/// Handle over the dispatcher task, so polling can be stopped from outside.
+struct Poller {
+    token: ShutdownToken,
+    task: JoinHandle<()>,
 }
 
 impl Messages {
     /// Waits for the next incoming message; `None` means polling stopped.
     pub async fn next(&mut self) -> Option<Message> {
         self.receiver.recv().await
+    }
+
+    /// Stops forwarding, leaving buffered messages readable for a drain.
+    ///
+    /// Closing the receiver makes a blocked `send` fail, which releases a dispatcher worker that is
+    /// stuck on a full channel, so awaiting the dispatcher afterwards cannot deadlock.
+    pub fn close(&mut self) {
+        self.receiver.close();
+    }
+
+    /// Stops the dispatcher and waits for its task, bounded by [`DISPATCHER_STOP_TIMEOUT`].
+    pub async fn stop(mut self) {
+        // Idempotent after `close`, and required here so a blocked worker can finish.
+        self.receiver.close();
+
+        if self.poller.token.shutdown().is_err() {
+            tracing::debug!("The Telegram dispatcher is not running");
+        }
+
+        match tokio::time::timeout(DISPATCHER_STOP_TIMEOUT, self.poller.task).await {
+            Ok(Ok(())) => tracing::info!("Stopped polling Telegram"),
+            Ok(Err(error)) => tracing::error!(
+                error = &error as &dyn std::error::Error,
+                "The Telegram dispatcher panicked"
+            ),
+            Err(_) => tracing::warn!(
+                timeout_seconds = DISPATCHER_STOP_TIMEOUT.as_secs(),
+                "The Telegram dispatcher did not stop in time"
+            ),
+        }
     }
 }
 
@@ -51,21 +94,26 @@ impl Telegram {
     /// Starts long polling and returns the stream of incoming messages.
     ///
     /// Transient polling failures are retried by the dispatcher's update listener. The dispatcher
-    /// runs in the background and ends with the runtime.
+    /// runs in the background until [`Messages::stop`] asks it to stop, or until the runtime ends.
     pub fn messages(&self) -> Messages {
         let (sender, receiver) = mpsc::channel(64);
         let handler = Update::filter_message().endpoint(forward_message);
         let bot = self.bot.clone();
 
-        tokio::spawn(async move {
-            Dispatcher::builder(bot, handler)
-                .dependencies(dptree::deps![sender])
-                .build()
-                .dispatch()
-                .await;
+        let mut dispatcher = Dispatcher::builder(bot, handler)
+            .dependencies(dptree::deps![sender])
+            .build();
+        // Taken before the dispatcher is moved, because the token is the only outward handle.
+        let token = dispatcher.shutdown_token();
+
+        let task = tokio::spawn(async move {
+            dispatcher.dispatch().await;
         });
 
-        Messages { receiver }
+        Messages {
+            receiver,
+            poller: Poller { token, task },
+        }
     }
 
     /// Downloads the file a Telegram `file_id` names into `destination`, replacing its contents.
@@ -80,13 +128,18 @@ impl Telegram {
     }
 
     /// Sends `text` to `chat_id`, answering `reply_to` when it is set.
+    ///
+    /// `text` is Telegram HTML, already escaped by the producer; this method only forwards it.
     pub async fn send(
         &self,
         chat_id: i64,
         text: &str,
         reply_to: Option<i64>,
     ) -> Result<(), TelegramError> {
-        let mut request = self.bot.send_message(ChatId(chat_id), text);
+        let mut request = self
+            .bot
+            .send_message(ChatId(chat_id), text)
+            .parse_mode(ParseMode::Html);
 
         if let Some(reply) = reply_parameters(reply_to)? {
             request = request.reply_parameters(reply);

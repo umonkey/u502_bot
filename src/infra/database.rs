@@ -133,6 +133,13 @@ impl Database {
         &self.pool
     }
 
+    /// Closes every pooled connection, checkpointing the write-ahead log.
+    ///
+    /// Callers invoke it after the services stopped, so no repository is still holding a connection.
+    pub async fn close(self) {
+        self.pool.close().await;
+    }
+
     async fn open(
         pool: PoolOptions<Sqlite>,
         options: SqliteConnectOptions,
