@@ -2,8 +2,9 @@
 //!
 //! Everything fallible is resolved before the first task is spawned, so a configuration failure
 //! exits with nothing started: no ingestor, no transcriber, no outbox, and no database write.
-//! Configuration is loaded before the `tracing` subscriber exists, so that failure is reported after
-//! a second best-effort DSN resolution.
+//! Configuration is loaded before the `tracing` subscriber exists, so this module resolves the DSN
+//! once more, best effort, before reporting the failure in the one place that maps any failure to an
+//! exit code.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -24,42 +25,45 @@ use crate::services::wake::Wake;
 use crate::shared::result::{Error, Result};
 
 pub async fn run() -> ExitCode {
-    let settings = match Settings::load() {
-        Ok(settings) => settings,
-        Err(error) => return fail_to_load(error),
-    };
-    let _sentry_guard = sentry::init(&settings.sentry_dsn);
-    tracing::info!("Starting the Telegram bot.");
+    let settings = context(Settings::load(), "Failed to load the configuration");
 
-    match start(settings).await {
+    // Configuration is loaded before the subscriber exists, so the DSN comes from the settings when
+    // they load and is resolved once more, best effort, when they do not.
+    let _sentry_guard = match &settings {
+        Ok(settings) => sentry::init(&settings.sentry_dsn),
+        Err(_) => sentry::init(&config::sentry_dsn()),
+    };
+
+    let outcome = match settings {
+        Ok(settings) => {
+            tracing::info!("Starting the Telegram bot.");
+            start(settings).await
+        }
+        // Rebuilt as the outcome type so one match below maps every failure to an exit code.
+        Err(error) => Err(error),
+    };
+
+    match outcome {
         Ok(()) => ExitCode::SUCCESS,
-        Err(code) => code,
+        Err(error) => {
+            tracing::error!(
+                error = &error as &dyn std::error::Error,
+                "Failed to start the bot"
+            );
+
+            ExitCode::FAILURE
+        }
     }
 }
 
-/// Reports a configuration failure that happened before the subscriber was installed.
-///
-/// The DSN is resolved a second time, on a path that is already exiting, so a usable destination
-/// still receives the failure. `sentry::init` is called once per process: the success path has
-/// already returned when this runs.
-fn fail_to_load(error: Error) -> ExitCode {
-    let _sentry_guard = sentry::init(&config::sentry_dsn());
-    tracing::error!(
-        error = &error as &dyn std::error::Error,
-        "Failed to load the configuration"
-    );
-
-    ExitCode::FAILURE
-}
-
 /// Builds every client and repository, then runs the services until a signal or a service ends them.
-async fn start(settings: Settings) -> Result<(), ExitCode> {
+async fn start(settings: Settings) -> Result<()> {
     // Registered first, so a signal that arrives during the slow startup work is remembered by the
     // sticky flag instead of killing the process.
     let shutdown = Shutdown::new();
     let _signals = tokio::spawn(watch_for_shutdown(shutdown.clone()));
 
-    let database = resolve(
+    let database = context(
         init_database(&settings.database_path).await,
         "Failed to open the database",
     )?;
@@ -81,11 +85,11 @@ async fn start(settings: Settings) -> Result<(), ExitCode> {
         );
     }
 
-    let openrouter = resolve(
+    let openrouter = context(
         OpenRouter::new(settings.openrouter_api_key, settings.transcribe_model),
         "Failed to build the OpenRouter client",
     )?;
-    let telegram = resolve(
+    let telegram = context(
         Telegram::connect(settings.telegram_api_token).await,
         "Failed to start the Telegram bot",
     )?;
@@ -153,12 +157,11 @@ async fn init_database(path: &Path) -> Result<database::Database> {
     Ok(database)
 }
 
-/// Logs a startup failure and turns it into the exit code `start` propagates.
-fn resolve<T>(result: Result<T>, message: &'static str) -> Result<T, ExitCode> {
-    result.map_err(|error| {
-        tracing::error!(error = &error as &dyn std::error::Error, "{message}");
-
-        ExitCode::FAILURE
+/// Names the startup step that failed, so the one log line still says where it failed.
+fn context<T>(result: Result<T>, message: &'static str) -> Result<T> {
+    result.map_err(|error| Error::External {
+        context: message,
+        source: Box::new(error),
     })
 }
 
@@ -180,5 +183,25 @@ fn log_service_exit(
             error = &error as &dyn std::error::Error,
             "A service panicked; the remaining services keep running"
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_names_the_step_and_keeps_the_cause() {
+        let error = context(
+            Err::<(), _>(Error::MissingVariable("DATABASE_PATH".to_owned())),
+            "Failed to open the database",
+        )
+        .expect_err("a failed step stays a failure");
+
+        assert_eq!(
+            error.to_string(),
+            "Failed to open the database: DATABASE_PATH is not set: neither DATABASE_PATH_FILE nor DATABASE_PATH exists"
+        );
+        assert!(std::error::Error::source(&error).is_some());
     }
 }

@@ -36,7 +36,7 @@ pub enum Error {
     InvalidChatId(String),
 
     // External clients
-    /// A client call failed; `context` names what was being done, and `source` keeps the cause.
+    /// A call failed; `context` names what was being done, and `source` keeps the cause.
     External {
         context: &'static str,
         source: Box<dyn std::error::Error + Send + Sync>,

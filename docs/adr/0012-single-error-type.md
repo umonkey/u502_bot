@@ -1,7 +1,6 @@
 # ADR 0012: Use one application error type
 
 - Status: accepted
-- Amended: 2026-11-18, to record the integration-specific variants and the start exception.
 - Date: 2026-11-18
 
 ## Context
@@ -39,8 +38,9 @@ conversion lives in the module that owns the client producing it.
   shared list, so the list grows with each integration
 - the shared set grows with the program and needs curating, because it is one flat list
 - a wrapped library failure hides the cases a library upgrade adds until code matches on them
-- `start` is the one function that does not return the shared `Result`: it converts a failure into an
-  exit code after logging it
+- the command boundary is the only place a failure becomes a process exit code: every fallible
+  function returns the shared result type, and the command reports one failure and maps it to an
+  unsuccessful exit
 
 ## Alternatives considered
 
