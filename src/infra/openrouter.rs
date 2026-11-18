@@ -21,15 +21,10 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 
+use crate::infra::config::{VariableName, get_optional};
 use crate::infra::sentry;
 
-/// Environment variable holding the OpenRouter API key.
-pub const OPENROUTER_API_KEY: &str = "OPENROUTER_API_KEY";
-
-/// Environment variable naming the model used to transcribe.
-pub const TRANSCRIBE_MODEL_NAME: &str = "TRANSCRIBE_MODEL_NAME";
-
-/// Model used when [`TRANSCRIBE_MODEL_NAME`] is unset or empty.
+/// Model used when [`VariableName::TranscribeModelName`] is unset or empty.
 pub const DEFAULT_TRANSCRIBE_MODEL: &str = "google/gemini-2.5-flash";
 
 /// Chat Completions endpoint.
@@ -44,21 +39,31 @@ const MAX_TOKENS: u32 = 4_096;
 /// Characters of an error body kept for the logs.
 const MAX_ERROR_BODY: usize = 500;
 
-/// Resolves the transcription model from [`TRANSCRIBE_MODEL_NAME`].
+/// Resolves the transcription model from [`VariableName::TranscribeModelName`].
+///
+/// An absent value falls back to [`DEFAULT_TRANSCRIBE_MODEL`]. A value that cannot be read, such as
+/// a broken `<NAME>_FILE`, logs one warning and falls back the same way.
 pub fn model_from_env() -> String {
-    resolve_model(std::env::var(TRANSCRIBE_MODEL_NAME).ok())
+    match get_optional(VariableName::TranscribeModelName) {
+        Ok(model) => resolve_model(model),
+        Err(error) => {
+            tracing::warn!(
+                error = &error as &dyn std::error::Error,
+                variable = %VariableName::TranscribeModelName,
+                "Cannot read the transcription model; falling back to {}",
+                DEFAULT_TRANSCRIBE_MODEL
+            );
+            resolve_model(None)
+        }
+    }
 }
 
-/// Resolves a raw model setting, falling back to [`DEFAULT_TRANSCRIBE_MODEL`] when it is absent,
-/// empty, or whitespace-only.
+/// Resolves a raw model setting, falling back to [`DEFAULT_TRANSCRIBE_MODEL`] when it is absent.
 ///
-/// A configured value is returned verbatim: only the emptiness check trims, so a model id an
-/// operator set on purpose is never rewritten.
+/// A configured value is returned verbatim: the resolver already trimmed it and rejected blank
+/// values, so a model id an operator set on purpose is never rewritten.
 fn resolve_model(raw: Option<String>) -> String {
-    match raw {
-        Some(model) if !model.trim().is_empty() => model,
-        _ => DEFAULT_TRANSCRIBE_MODEL.to_owned(),
-    }
+    raw.unwrap_or_else(|| DEFAULT_TRANSCRIBE_MODEL.to_owned())
 }
 
 /// The container name sent as `input_audio.format`.
@@ -120,7 +125,11 @@ impl AudioFormat {
 #[derive(Debug)]
 pub enum OpenRouterError {
     /// The key or the model is empty after trimming, so the client cannot be used.
-    EmptyConfig { name: &'static str },
+    ///
+    /// Environment configuration cannot reach this: the key arrives through `require_secret`, which
+    /// treats a blank value as missing, and [`model_from_env`] never yields a blank model. The
+    /// check remains for a directly constructed [`OpenRouter`].
+    EmptyConfig { name: VariableName },
     /// The request could not be sent, or its body could not be read.
     Request(reqwest::Error),
     /// OpenRouter answered with a non-success status.
@@ -195,18 +204,19 @@ pub struct OpenRouter {
 impl OpenRouter {
     /// Builds a client with a 120-second request timeout.
     ///
-    /// Returns [`OpenRouterError::EmptyConfig`] when the key or the model is empty after trimming:
-    /// an empty secret file must fail startup instead of producing a 401 on every transcription.
+    /// Returns [`OpenRouterError::EmptyConfig`] when the key or the model is empty after trimming,
+    /// so a directly constructed client cannot send a request that is doomed to a 401. Configured
+    /// values never arrive blank: the resolver trims them and treats blank as missing.
     pub fn new(api_key: String, model: String) -> Result<Self, OpenRouterError> {
         if api_key.trim().is_empty() {
             return Err(OpenRouterError::EmptyConfig {
-                name: OPENROUTER_API_KEY,
+                name: VariableName::OpenRouterApiKey,
             });
         }
 
         if model.trim().is_empty() {
             return Err(OpenRouterError::EmptyConfig {
-                name: TRANSCRIBE_MODEL_NAME,
+                name: VariableName::TranscribeModelName,
             });
         }
 
@@ -424,16 +434,6 @@ mod tests {
     }
 
     #[test]
-    fn blank_model_resolves_to_the_default() {
-        for raw in ["", "   ", "\n\t"] {
-            assert_eq!(
-                resolve_model(Some(raw.to_owned())),
-                DEFAULT_TRANSCRIBE_MODEL
-            );
-        }
-    }
-
-    #[test]
     fn configured_model_is_kept_verbatim() {
         assert_eq!(
             resolve_model(Some("openai/whisper-1".to_owned())),
@@ -446,7 +446,7 @@ mod tests {
         for key in ["", "   "] {
             assert!(matches!(
                 OpenRouter::new(key.to_owned(), DEFAULT_TRANSCRIBE_MODEL.to_owned()),
-                Err(OpenRouterError::EmptyConfig { name }) if name == OPENROUTER_API_KEY
+                Err(OpenRouterError::EmptyConfig { name }) if name == VariableName::OpenRouterApiKey
             ));
         }
     }
@@ -456,7 +456,7 @@ mod tests {
         for model in ["", "   "] {
             assert!(matches!(
                 OpenRouter::new("key".to_owned(), model.to_owned()),
-                Err(OpenRouterError::EmptyConfig { name }) if name == TRANSCRIBE_MODEL_NAME
+                Err(OpenRouterError::EmptyConfig { name }) if name == VariableName::TranscribeModelName
             ));
         }
     }

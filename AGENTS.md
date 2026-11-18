@@ -14,7 +14,7 @@ u502_bot is a Rust Telegram bot for a local car community.
 - An OpenRouter API key: required to run `cargo run -- start`, for the same reason. The numeric ids of the chats to transcribe are optional and can be collected from the logs after the bot starts.
 - universal-ctags (optional): required only for `make tags`.
 - Node and `npx` (optional): required only for `make format-docs`.
-- ffmpeg: required to transcribe video; installed in the runtime image, and `FFMPEG_PATH` can point at a different binary. Audio is transcribed without it.
+- ffmpeg: required to transcribe video; installed in the runtime image, and `FFMPEG_PATH` can point at a different binary. A non-UTF-8 value logs one warning and falls back to the `ffmpeg` on `PATH`. Audio is transcribed without it.
 - Docker: host only; images are published by CI, not built in this development container.
 
 ## Commands
@@ -43,11 +43,11 @@ Running `make` without a target executes `check`.
 - `src/domains/message.rs`: the message model and the repository that owns the `messages` SQL.
 - `src/domains/outbox.rs`: the outbox model and the repository that owns the `outbox` SQL.
 - `src/infra.rs`: declares the infra modules.
-- `src/infra/config.rs`: `get_secret` and `SecretError`, with `<NAME>_FILE` precedence.
+- `src/infra/config.rs`: `VariableName`, the enum naming every environment variable, plus `get_optional`, `require_secret`, and `VariableError`; one resolver gives every variable the same form: `<NAME>_FILE` first, then `<NAME>`, the value trimmed, blank meaning unset, UTF-8 only.
 - `src/infra/database.rs`: `Database`, `DatabaseError`, `database_path`, and `SCHEMA`; the async SQLite client, which opens a pooled connection and applies the embedded schema without knowing any table.
-- `src/infra/ffmpeg.rs`: `Ffmpeg`, `FFMPEG_PATH`, and `FfmpegError`; the client for the `ffmpeg` program, which extracts a video's first audio track to Ogg/Opus under a timeout, kills the child on drop, and records its own call telemetry.
+- `src/infra/ffmpeg.rs`: `Ffmpeg` and `FfmpegError`; the client for the `ffmpeg` program, which extracts a video's first audio track to Ogg/Opus under a timeout, kills the child on drop, and records its own call telemetry. The binary path comes from `VariableName::FfmpegPath`; an unusable value, whether non-UTF-8 or an unreadable `FFMPEG_PATH_FILE`, logs one warning and falls back to the `ffmpeg` on `PATH`.
 - `src/infra/openrouter.rs`: `OpenRouter`, `model_from_env`, `DEFAULT_TRANSCRIBE_MODEL`, and `AudioFormat`; the audio transcription client, which records its own call telemetry.
-- `src/infra/sentry.rs`: `SENTRY_DSN`, `init` (the `tracing` subscriber, the optional Sentry client, an error layer, and a crate-scoped structured-log layer), and the metric functions for messages, attachments, the outbox, OpenRouter, and ffmpeg.
+- `src/infra/sentry.rs`: `VariableName::SentryDsn`, `init` (the `tracing` subscriber, the optional Sentry client, an error layer, and a crate-scoped structured-log layer), and the metric functions for messages, attachments, the outbox, OpenRouter, and ffmpeg.
 - `src/infra/signal.rs`: `Signal` and `wait`; the listener for `SIGINT` and, on Unix, `SIGTERM`.
 - `src/infra/telegram_bot.rs`: `Telegram` and `Messages`, the Telegram client; it receives, downloads, and sends, and knows nothing about storage.
 - `src/services.rs`: declares the long-running services, the shutdown flag they share, and their shared clock.
@@ -107,7 +107,7 @@ docker compose up -d           # start detached
 Architecture decisions live in `docs/adr/`, one Markdown file per decision, named `NNNN-slug.md`.
 
 - ADR 0001 records the decision to use Rust.
-- ADR 0002 records the decision to read secrets from the environment or from a file.
+- ADR 0002 records the decision to read every configuration variable from the environment or from a file.
 - ADR 0003 records the decision to receive updates by long polling.
 - ADR 0004 records the decision to report errors and metrics to Sentry.
 - ADR 0005 records the decision to store messages in a local SQLite database.
@@ -128,13 +128,15 @@ Pushes to `master` publish `ghcr.io/umonkey/u502_bot:latest` to GHCR. The publis
 
 ## Secrets
 
+Every variable resolves the same way: `<NAME>_FILE` when it is set, otherwise `<NAME>`, with the value trimmed and a blank value counting as unset. Prefer the file form for the bot token, the OpenRouter key, and the Sentry DSN anyway, because a container's environment is rendered by `docker inspect` and inherited by child processes such as `ffmpeg`, while a mounted file is neither.
+
 The bot token can be supplied in three ways:
 
 - `TELEGRAM_API_TOKEN`: the token itself, convenient for local runs.
 - `TELEGRAM_API_TOKEN_FILE`: the path of a file holding the token.
 - Compose: sets `TELEGRAM_API_TOKEN_FILE=/run/secrets/telegram_api_token` and mounts `.secrets/telegram_api_token` there, so the token never enters the container environment or `docker inspect`.
 
-`TELEGRAM_API_TOKEN_FILE` wins when both variables are set, and one trailing newline in the file is ignored. Create the file before running Compose:
+`TELEGRAM_API_TOKEN_FILE` wins when both variables are set, as every `<NAME>_FILE` does, and the value is trimmed so a trailing newline is harmless. Create the file before running Compose:
 
 ```bash
 mkdir -p .secrets
@@ -146,7 +148,7 @@ chmod 600 .secrets/telegram_api_token
 
 Never bake tokens into the image or source. The token is read from the environment at runtime.
 
-The Sentry DSN is read the same way, through `get_secret`:
+The Sentry DSN resolves through `get_optional(VariableName::SentryDsn)` like every other variable, from `SENTRY_DSN_FILE` first and `SENTRY_DSN` second:
 
 - `SENTRY_DSN`: the DSN itself, convenient for local runs.
 - `SENTRY_DSN_FILE`: the path of a file holding the DSN.
@@ -161,13 +163,13 @@ chmod 600 .secrets/sentry_dsn
 : > .secrets/sentry_dsn      # opt out: an empty file disables Sentry
 ```
 
-The OpenRouter key is read the same way:
+The OpenRouter key resolves the same way:
 
 - `OPENROUTER_API_KEY`: the key itself, convenient for local runs.
 - `OPENROUTER_API_KEY_FILE`: the path of a file holding the key.
 - Compose: sets `OPENROUTER_API_KEY_FILE=/run/secrets/openrouter_api_key` and mounts `.secrets/openrouter_api_key` there, so the key never enters the container environment or `docker inspect`.
 
-`OPENROUTER_API_KEY_FILE` wins when both variables are set, and one trailing newline in the file is ignored. Unlike the DSN, the key is required: a missing, empty, or whitespace-only value fails startup, and an empty file is not a valid opt-out, because an empty secret counts as a missing one. Create the file before running Compose:
+`OPENROUTER_API_KEY_FILE` wins when both variables are set, as every `<NAME>_FILE` does, and the value is trimmed so a trailing newline is harmless. Unlike the DSN, the key is required: a missing, empty, or whitespace-only value fails startup, and an empty file is not a valid opt-out, because an empty secret counts as a missing one. Create the file before running Compose:
 
 ```bash
 mkdir -p .secrets
@@ -175,11 +177,11 @@ printf '%s' "$OPENROUTER_API_KEY" > .secrets/openrouter_api_key
 chmod 600 .secrets/openrouter_api_key
 ```
 
-`TRANSCRIBE_CHATS` is not a secret, so it is ordinary configuration read with `std::env`: a comma-separated list of numeric chat ids, optional, where empty means "transcribe nothing" and every audio and video attachment is skipped and marked processed. The skip warning carries the chat id, so an operator starts with an empty list, reads the ids from the logs, and adds them. A non-numeric entry still fails startup. `TRANSCRIBE_MODEL_NAME` is optional too and read the same way; when it is unset or empty the compiled-in default `google/gemini-2.5-flash` is used, and startup logs `Using model <id> to transcribe; override with TRANSCRIBE_MODEL_NAME` so the model in use is visible.
+`TRANSCRIBE_CHATS` is ordinary configuration read through `get_optional(VariableName::TranscribeChats)`, with the same file form as everything else: a comma-separated list of numeric chat ids, optional, where empty means "transcribe nothing" and every audio and video attachment is skipped and marked processed. The skip warning carries the chat id, so an operator starts with an empty list, reads the ids from the logs, and adds them. A non-numeric entry still fails startup. `TRANSCRIBE_MODEL_NAME` is optional too and read the same way; when it is unset or empty the compiled-in default `google/gemini-2.5-flash` is used, and startup logs `Using model <id> to transcribe; override with TRANSCRIBE_MODEL_NAME` so the model in use is visible.
 
 ## Storage
 
-Messages live in a local SQLite database. The schema is embedded at build time with `include_str!` from `dev/schema.sql` and applied on every startup, so there is no schema path or environment variable to configure. The database is opened asynchronously at startup and accessed through the message repository in `src/domains/message.rs`, the attachment repository in `src/domains/attachment.rs`, and the outbox repository in `src/domains/outbox.rs`. The database path comes from `DATABASE_PATH`, which is ordinary configuration read with `std::env`, not a secret and therefore not through `get_secret`; it is required, so a missing value fails startup, and Compose sets it to `/opt/data/database.sqlite`. The ingestor stores every delivered message in `messages` and skips a redelivery by its `(chat_id, message_id)` uniqueness. Every incoming audio or video message also records one row in `attachments`, keyed by the same `(chat_id, message_id)` pair, holding the Telegram `file_id`, the MIME type, the duration, the size, and a `transcribed` flag that means processed: transcribed or deliberately skipped. The transcriber scans that flag, reading audio and video rows whose message is at most an hour old, so the age of the message bounds both cost and retries; a partial index serves the pending scan. Outgoing replies live in `outbox`, one row per Telegram message, holding the chat, the message id to answer when there is one, the queue time, the delivery time, and the text. `sent_at` stays NULL until Telegram accepts a row, and a partial index serves the pending scan.
+Messages live in a local SQLite database. The schema is embedded at build time with `include_str!` from `dev/schema.sql` and applied on every startup, so there is no schema path or environment variable to configure. The database is opened asynchronously at startup and accessed through the message repository in `src/domains/message.rs`, the attachment repository in `src/domains/attachment.rs`, and the outbox repository in `src/domains/outbox.rs`. The database path comes from `DATABASE_PATH`, read through `get_optional(VariableName::DatabasePath)` with the same `<NAME>_FILE` form as every other variable, and it remains required, so a missing value fails startup; Compose sets it to `/opt/data/database.sqlite`. The ingestor stores every delivered message in `messages` and skips a redelivery by its `(chat_id, message_id)` uniqueness. Every incoming audio or video message also records one row in `attachments`, keyed by the same `(chat_id, message_id)` pair, holding the Telegram `file_id`, the MIME type, the duration, the size, and a `transcribed` flag that means processed: transcribed or deliberately skipped. The transcriber scans that flag, reading audio and video rows whose message is at most an hour old, so the age of the message bounds both cost and retries; a partial index serves the pending scan. Outgoing replies live in `outbox`, one row per Telegram message, holding the chat, the message id to answer when there is one, the queue time, the delivery time, and the text. `sent_at` stays NULL until Telegram accepts a row, and a partial index serves the pending scan.
 
 ## Observability
 

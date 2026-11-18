@@ -1,10 +1,10 @@
 //! Error reporting, application logs, and metrics through Sentry.
 //!
-//! [`init`] installs the global `tracing` subscriber and, when `SENTRY_DSN` resolves to a valid
-//! DSN, a Sentry client. A missing, empty, or invalid DSN only logs a warning: observability must
-//! never keep the bot from running. Every `ERROR` event and every panic becomes an issue, and every
-//! `INFO`-or-higher event from this crate becomes a structured log, so those logs include the
-//! message content the command layer records.
+//! [`init`] installs the global `tracing` subscriber and, when [`VariableName::SentryDsn`] resolves
+//! to a valid DSN, a Sentry client. A missing, empty, or invalid DSN only logs a warning:
+//! observability must never keep the bot from running. Every `ERROR` event and every panic becomes
+//! an issue, and every `INFO`-or-higher event from this crate becomes a structured log, so those
+//! logs include the message content the command layer records.
 //!
 //! The metric functions in this module are the only place metrics are recorded. They carry no
 //! attributes: a counter or distribution name alone identifies what is measured, so an operator
@@ -18,10 +18,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{Layer, filter::EnvFilter};
 
-use crate::infra::config::get_secret;
-
-/// Environment variable holding the Sentry DSN.
-pub const SENTRY_DSN: &str = "SENTRY_DSN";
+use crate::infra::config::{VariableName, get_optional};
 
 /// Log level forwarded to Sentry. Fixed so `RUST_LOG` stays a console-only control.
 const SENTRY_LOG_LEVEL: LevelFilter = LevelFilter::INFO;
@@ -189,23 +186,25 @@ pub fn ffmpeg_call(duration: Duration) {
 }
 
 /// Reads the DSN, mapping every failure to a reason to disable reporting.
+///
+/// The resolver returns `None` for an absent or blank DSN, which is the documented opt-out; an
+/// unusable file or non-Unicode value is reported as a reason instead.
 fn resolve_dsn() -> Result<sentry::types::Dsn, String> {
-    let raw =
-        get_secret(SENTRY_DSN).map_err(|error| format!("{SENTRY_DSN} is not set: {error}"))?;
-    match parse_dsn(&raw) {
-        Ok(Some(dsn)) => Ok(dsn),
-        Ok(None) => Err(format!("{SENTRY_DSN} is empty")),
-        Err(error) => Err(format!("{SENTRY_DSN} is not a valid DSN: {error}")),
+    let name = VariableName::SentryDsn;
+    match get_optional(name) {
+        Ok(Some(raw)) => {
+            parse_dsn(&raw).map_err(|error| format!("{name} is not a valid DSN: {error}"))
+        }
+        Ok(None) => Err(format!("{name} is not set")),
+        Err(error) => Err(format!("{name} is not set: {error}")),
     }
 }
 
-/// Parses a raw DSN, treating blank values as "not configured".
-fn parse_dsn(raw: &str) -> Result<Option<sentry::types::Dsn>, sentry::types::ParseDsnError> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    trimmed.parse().map(Some)
+/// Parses a raw DSN.
+///
+/// The resolver already trims and rejects blank values, so a blank DSN never reaches this point.
+fn parse_dsn(raw: &str) -> Result<sentry::types::Dsn, sentry::types::ParseDsnError> {
+    raw.parse()
 }
 
 /// Returns whether `target` belongs to this crate, so only its events are reported as logs.
@@ -239,17 +238,17 @@ mod tests {
     }
 
     #[test]
-    fn blank_dsn_is_treated_as_not_configured() {
+    fn blank_dsn_is_not_a_valid_dsn() {
+        // Opting out happens one layer up: the resolver reports a blank value as unset, so it
+        // arrives here as `Ok(None)` and never as an empty string.
         for raw in ["", "  \n"] {
-            assert!(matches!(parse_dsn(raw), Ok(None)));
+            assert!(parse_dsn(raw).is_err(), "raw {raw:?}");
         }
     }
 
     #[test]
     fn valid_dsn_is_parsed() {
-        let dsn = parse_dsn("https://public@example.com/1")
-            .expect("valid DSN should parse")
-            .expect("valid DSN should be configured");
+        let dsn = parse_dsn("https://public@example.com/1").expect("valid DSN should parse");
         assert_eq!(dsn.host(), "example.com");
     }
 

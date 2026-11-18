@@ -18,7 +18,9 @@ Configuration options are read from the environment.
 - `TRANSCRIBE_CHATS`: comma-separated numeric ids of the chats whose audio and video are transcribed. Optional; empty transcribes nothing.
 - `DATABASE_PATH`: path of the SQLite file that stores incoming messages, the metadata of their audio and video attachments, and the replies waiting to be sent. Required; Compose uses `/opt/data/database.sqlite`.
 
-Each secret can also be supplied through the file named by its `_FILE` variant, such as `OPENROUTER_API_KEY_FILE`, which wins when both are set.
+Every variable in that list can also be supplied through the file named by its `_FILE` variant, such as `OPENROUTER_API_KEY_FILE` or `DATABASE_PATH_FILE`, which wins when both are set. The file is read and decoded as UTF-8, the value is trimmed of surrounding whitespace, and a value that is blank after trimming counts as unset. `RUST_LOG` is the one exception: the logging filter reads it, not this list, so it is the only setting without a `_FILE` variant.
+
+Prefer the file form for the bot token, the OpenRouter key, and the Sentry DSN: a container's environment is rendered by `docker inspect` and inherited by child processes such as `ffmpeg`, while a mounted file is neither.
 
 The bot refuses to start when `OPENROUTER_API_KEY` is missing: an unconfigured client would fail every transcription with an authentication error while the process looked healthy. An empty `openrouter_api_key` file is not a valid opt-out, unlike an empty `sentry_dsn` file, because an empty value counts as a missing key. Sentry and `TRANSCRIBE_CHATS` stay optional.
 

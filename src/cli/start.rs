@@ -8,16 +8,15 @@ use std::process::ExitCode;
 use crate::domains::attachment::AttachmentRepository;
 use crate::domains::message::MessageRepository;
 use crate::domains::outbox::OutboxRepository;
+use crate::infra::config::{VariableName, require_secret};
 use crate::infra::ffmpeg::Ffmpeg;
 use crate::infra::openrouter::{self, OpenRouter};
 use crate::infra::telegram_bot::Telegram;
-use crate::infra::{config::get_secret, database, sentry, signal};
+use crate::infra::{database, sentry, signal};
 use crate::services::ingestor::Ingestor;
 use crate::services::outbox::Outbox;
 use crate::services::shutdown::Shutdown;
 use crate::services::transcriber::{Transcriber, Whitelist};
-
-const TELEGRAM_API_TOKEN: &str = "TELEGRAM_API_TOKEN";
 
 pub async fn run() -> ExitCode {
     let _sentry_guard = sentry::init();
@@ -37,13 +36,13 @@ async fn start() -> Result<(), ExitCode> {
     let _signals = tokio::spawn(watch_for_shutdown(shutdown.clone()));
 
     let token = resolve(
-        get_secret(TELEGRAM_API_TOKEN),
+        require_secret(VariableName::TelegramApiToken),
         "Failed to load TELEGRAM_API_TOKEN",
     )?;
     let database = resolve(init_database().await, "Failed to open the database")?;
 
     let openrouter_key = resolve(
-        get_secret(openrouter::OPENROUTER_API_KEY),
+        require_secret(VariableName::OpenRouterApiKey),
         "Failed to load OPENROUTER_API_KEY",
     )?;
     let model = openrouter::model_from_env();

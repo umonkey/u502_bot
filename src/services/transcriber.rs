@@ -7,18 +7,18 @@
 //! Either way the transcript is queued in the outbox and the attachment is marked processed.
 //!
 //! The one-hour window bounds both cost and retries: a file that keeps failing is retried on every
-//! scan until its message ages out, and then left alone. `TRANSCRIBE_CHATS` limits which chats are
-//! transcribed at all, because a transcription spends credits and sends audio to a third party. The
-//! variable is optional: an empty list transcribes nothing and the skip warnings publish the chat ids
-//! an operator needs before the list is known.
+//! scan until its message ages out, and then left alone. [`VariableName::TranscribeChats`] limits
+//! which chats are transcribed at all, because a transcription spends credits and sends audio to a
+//! third party. The variable is optional: an empty list transcribes nothing and the skip warnings
+//! publish the chat ids an operator needs before the list is known.
 
 use std::collections::HashSet;
-use std::env::VarError;
 use std::fmt;
 use std::time::Duration;
 
 use crate::domains::attachment::{AttachmentKind, AttachmentRepository, PendingAttachment};
 use crate::domains::outbox::{NewOutboxMessage, OutboxError, OutboxRepository};
+use crate::infra::config::{VariableError, VariableName, get_optional};
 use crate::infra::ffmpeg::{Ffmpeg, FfmpegError};
 use crate::infra::openrouter::{AudioFormat, OpenRouter};
 use crate::infra::sentry;
@@ -31,9 +31,6 @@ const TRANSCRIPTION_PROMPT: &str = "Transcribe this voice message verbatim in th
 
 /// Plain-text header placed above the transcript in the first reply.
 const REPLY_HEADER: &str = "Message transcript:";
-
-/// Environment variable holding the comma-separated list of chats to transcribe.
-const TRANSCRIBE_CHATS: &str = "TRANSCRIBE_CHATS";
 
 /// Only messages at most this old are transcribed, which bounds cost and retries.
 const WINDOW_SECONDS: i64 = 3_600;
@@ -88,17 +85,13 @@ impl Whitelist {
         Ok(Self(chats))
     }
 
-    /// Reads the whitelist from [`TRANSCRIBE_CHATS`].
+    /// Reads the whitelist from [`VariableName::TranscribeChats`].
     ///
     /// An unset variable yields an empty whitelist rather than an error; see [`Self::parse`].
     pub fn from_env() -> Result<Self, WhitelistError> {
-        match std::env::var(TRANSCRIBE_CHATS) {
-            Ok(raw) => Self::from_value(Some(raw)),
-            Err(VarError::NotPresent) => Self::from_value(None),
-            Err(VarError::NotUnicode(_)) => {
-                Err(WhitelistError::NotUnicode(TRANSCRIBE_CHATS.to_owned()))
-            }
-        }
+        get_optional(VariableName::TranscribeChats)
+            .map_err(WhitelistError::Config)
+            .and_then(Self::from_value)
     }
 
     fn from_value(value: Option<String>) -> Result<Self, WhitelistError> {
@@ -122,8 +115,9 @@ impl Whitelist {
 /// Failure modes of reading the transcription whitelist.
 #[derive(Debug)]
 pub enum WhitelistError {
-    /// [`TRANSCRIBE_CHATS`] is not valid Unicode.
-    NotUnicode(String),
+    /// [`VariableName::TranscribeChats`] could not be resolved: a non-Unicode value, or a file
+    /// that cannot be read or is not UTF-8.
+    Config(VariableError),
     /// One entry is not a numeric chat id.
     NotANumber(String),
 }
@@ -131,16 +125,24 @@ pub enum WhitelistError {
 impl fmt::Display for WhitelistError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotUnicode(name) => write!(formatter, "{name} is not valid Unicode"),
+            Self::Config(source) => write!(formatter, "{source}"),
             Self::NotANumber(token) => write!(
                 formatter,
-                "{TRANSCRIBE_CHATS} entry {token:?} is not a numeric chat id"
+                "{} entry {token:?} is not a numeric chat id",
+                VariableName::TranscribeChats
             ),
         }
     }
 }
 
-impl std::error::Error for WhitelistError {}
+impl std::error::Error for WhitelistError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Config(source) => Some(source),
+            Self::NotANumber(_) => None,
+        }
+    }
+}
 
 /// Transcribes pending audio and video attachments and queues the transcripts for delivery.
 pub struct Transcriber {
