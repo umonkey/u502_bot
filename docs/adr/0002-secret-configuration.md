@@ -44,8 +44,9 @@ file form.
 - a non-UTF-8 `FFMPEG_PATH` logs one warning and falls back to the `ffmpeg` on `PATH`, which may be a
   different binary than intended
 - `<NAME>_FILE` no longer marks a value as sensitive, so the guidance to prefer the file form for the
-  token, the key, and the DSN lives in the README; the environment is rendered by `docker inspect` and
-  inherited by child processes such as `ffmpeg`, while a mounted file is neither
+  token, the key, and the DSN lives in `docs/features/configuration/README.md`; the environment is
+  rendered by `docker inspect` and inherited by child processes such as `ffmpeg`, while a mounted file
+  is neither
 - the resolver is tested without touching the real environment; the thin wiring around it is not
 
 ## Alternatives considered

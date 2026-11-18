@@ -35,6 +35,7 @@ Running `make` without a target executes `check`.
 
 ## Layout
 
+- `docs/features/<feature>/README.md`: user-facing documentation per feature; `README.md` indexes them and `docs/Install.md` covers running the bot.
 - `src/main.rs`: entry point; calls `cli::run()`.
 - `src/cli/mod.rs`: defines the clap `Command` enum, parses arguments, and routes each variant.
 - `src/cli/<command>.rs`: one module per subcommand; `src/cli/start.rs` composes the clients, the repositories, and the services.
