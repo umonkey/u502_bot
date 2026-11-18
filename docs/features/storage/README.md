@@ -12,6 +12,10 @@ One local SQLite database holds everything the bot keeps. There is no external d
 
 Incoming messages are unique by `(chat_id, message_id)`, so a redelivery is skipped instead of stored twice. Attachments are keyed by the same pair.
 
+### Atomicity
+
+A message and its attachment are written in one transaction, so they commit together: when the database rejects the attachment, the message is rolled back and neither row is kept. A rejected write is the only way a delivered message goes missing, because Telegram acknowledges an update when it is fetched and does not deliver it again. Rows written before this behavior existed can still hold a message without its attachment; a redelivery of that message writes the missing row.
+
 ## Attachments
 
 The `transcribed` flag means processed: transcribed, silent, or deliberately skipped. It is not "has a transcript". The pending scan reads rows whose message is at most an hour old, and a partial index serves it, so the age of the message bounds both cost and retries. See [transcription](../transcription/README.md).

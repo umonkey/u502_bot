@@ -20,8 +20,8 @@ Sentry is optional. A missing, blank, or invalid DSN logs one warning and the bo
 
 Application counters and timings are recorded as Sentry metrics. The pairs are meant to be compared: the gap between the first and the second of a pair is the work that did not complete.
 
-- `telegram.messages.received` and `telegram.messages.stored`: the gap is messages that failed to persist
-- `telegram.attachments.audio` and `telegram.attachments.video`, counted per received attachment, and `telegram.attachments.stored`, counted per successful statement
+- `telegram.messages.received` and `telegram.messages.stored`: the gap is messages whose transaction was rolled back
+- `telegram.attachments.audio` and `telegram.attachments.video`, counted per received attachment, and `telegram.attachments.stored`, counted once per committed transaction
 - `telegram.attachments.transcribed`: every attachment the transcriber finishes with, whether transcribed, silent, or skipped
 - `outbox.messages.added` and `outbox.messages.sent`: the gap is replies not yet delivered
 - `transcription.reply.latency`: a distribution in seconds from the Telegram send time of the source message to the moment Telegram accepts the reply. One sample is recorded per first reply chunk; Telegram's start time is whole seconds and includes the host-to-Telegram clock skew, so a persistent negative value means the host clock is ahead of Telegram's; and after a restart messages up to an hour old are still transcribed, so catch-up transcripts produce large samples

@@ -86,7 +86,6 @@ async fn start() -> Result<(), ExitCode> {
     let ingestor = Ingestor::new(
         telegram.messages(),
         MessageRepository::new(pool.clone()),
-        AttachmentRepository::new(pool.clone()),
         pending_attachments.clone(),
     );
     let transcriber = Transcriber::new(

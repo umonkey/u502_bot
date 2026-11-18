@@ -1,7 +1,7 @@
 # ADR 0006: Record attachment metadata for later processing
 
 - Status: accepted
-- Amended: 2026-11-18, to correct the redelivery consequence and record the no-FK and pending-scan decisions.
+- Amended: 2026-11-18, to correct the redelivery consequence, record the no-FK and pending-scan decisions, and record that the message and its attachment are written in one transaction.
 - Date: 2026-11-17
 
 ## Context
@@ -22,8 +22,10 @@ so a reader can choose the treatment without opening the file, and count both re
 attachments so a failed write is visible as a gap.
 
 Record the media family in `kind` (`audio` or `video`) because a video note carries no MIME type.
-There is deliberately no foreign key to `messages`: the ingestor writes the message first, and a
-constraint would only add a second failure mode to the attachment write. `pending` joins `messages`
+There is deliberately no foreign key to `messages`: the ingestor writes the message and, when it
+carries media, the attachment in one transaction, so an attachment failure rolls the message back and
+the invariant holds without one. A constraint would need a manual upgrade of existing volumes,
+because startup creates missing objects and never migrates (ADR 0005). `pending` joins `messages`
 and reads rows whose message is at most an hour old; the `transcribed` flag means processed,
 including a deliberate skip.
 
@@ -33,11 +35,12 @@ including a deliberate skip.
 - the store stays small, because only a description is kept
 - a reader selects work by the pending flag instead of re-reading updates
 - the file handle is the only link to the content, so it must stay valid until processing runs
-- a message and its description are written in two statements outside a transaction, so an
-  interruption between them leaves the media unrecorded permanently: the platform acknowledges an
-  update when it is fetched, so it is not delivered again
+- the message and its description commit together, so a failed description write leaves no
+  half-stored message; the delivery is still lost, because the platform acknowledges an update when
+  it is fetched and does not deliver it again
 - an attachment from a chat that is not allow-listed is marked processed without being downloaded
-- an attachment row can exist without a message row, and the pending scan's inner join hides it
+- an attachment row written before the atomic write existed can lack its message row, and the pending
+  scan's inner join hides it; a redelivery of that message writes the missing row
 
 ## Alternatives considered
 

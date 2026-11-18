@@ -186,7 +186,7 @@ mod tests {
         };
 
         MessageRepository::new(repository.pool.clone())
-            .store(&message)
+            .store(&message, None)
             .await
             .expect("source message should store");
     }

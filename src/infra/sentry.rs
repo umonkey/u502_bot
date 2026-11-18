@@ -76,10 +76,11 @@ pub fn message_received() {
     count(MetricName::TelegramMessagesReceived);
 }
 
-/// Records one Telegram message whose storage statement succeeded.
+/// Records one Telegram message whose transaction committed.
 ///
-/// A duplicate delivery counts too: the row is already durable, so the gap between the received
-/// and stored counters is exactly the number of messages that failed to persist.
+/// A duplicate delivery counts too: the row is already durable. A transaction rolled back over an
+/// attachment failure counts for neither this counter nor [`attachment_stored`], so the gap between
+/// the received and stored counters is exactly the messages whose transaction was rolled back.
 pub fn message_stored() {
     count(MetricName::TelegramMessagesStored);
 }
@@ -94,10 +95,11 @@ pub fn attachment_video() {
     count(MetricName::TelegramAttachmentsVideo);
 }
 
-/// Records one attachment whose storage statement succeeded.
+/// Records one attachment whose transaction committed.
 ///
-/// A duplicate delivery counts too: the row is already durable, so the gap between the received
-/// and stored counters is exactly the number of attachments that failed to persist.
+/// A duplicate delivery counts too: the row is already durable. A transaction rolled back over an
+/// attachment failure counts for neither this counter nor [`message_stored`], so the gap between
+/// the received and stored counters is exactly the attachments whose transaction was rolled back.
 pub fn attachment_stored() {
     count(MetricName::TelegramAttachmentsStored);
 }

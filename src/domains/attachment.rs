@@ -4,11 +4,12 @@
 //! [`NewAttachment`] before storing. [`AttachmentRepository`] must stay in sync with the
 //! `attachments` table in `dev/schema.sql`.
 //!
-//! There is deliberately no foreign key to `messages`: both rows are written by the same loop in the
-//! same order, and a constraint would only turn an attachment write into a failure mode of the
-//! message write.
+//! There is deliberately no foreign key to `messages`: the message and its attachment commit
+//! together inside [`crate::domains::message::MessageRepository::store`], and a constraint would
+//! need a manual upgrade of existing volumes (ADR 0005 creates missing objects only, never
+//! migrates).
 
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, SqliteConnection, SqlitePool};
 
 use crate::shared::result::Result;
 
@@ -84,9 +85,9 @@ pub struct PendingAttachment {
     pub file_size: Option<i64>,
 }
 
-/// What [`AttachmentRepository::store`] did with an attachment.
+/// What an attachment insert did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StoreOutcome {
+pub enum InsertOutcome {
     /// The row was written.
     Stored,
     /// The row was already there, so the redelivery was ignored.
@@ -106,39 +107,23 @@ impl AttachmentRepository {
 
     /// Stores one attachment, ignoring a redelivery of a row the table already holds.
     ///
-    /// Must stay in sync with the `attachments` table in `dev/schema.sql`: the column order and the
-    /// `UNIQUE (chat_id, message_id)` constraint are what make this statement idempotent. The
-    /// `transcribed` flag is written as a literal because nothing sets it yet.
-    pub async fn store(&self, attachment: &NewAttachment) -> Result<StoreOutcome> {
-        let result = sqlx::query(
-            "INSERT OR IGNORE INTO attachments \
-             (chat_id, message_id, kind, file_id, mime_type, duration_seconds, file_size, transcribed) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
-        )
-        .bind(attachment.chat_id)
-        .bind(attachment.message_id)
-        .bind(attachment.kind.as_str())
-        .bind(attachment.file_id.as_str())
-        .bind(attachment.mime_type.as_deref())
-        .bind(attachment.duration_seconds)
-        .bind(attachment.file_size)
-        .execute(&self.pool)
-        .await?;
+    /// Production writes the attachment inside
+    /// [`crate::domains::message::MessageRepository::store`]'s transaction, so only the tests open
+    /// this standalone form.
+    #[cfg(test)]
+    pub async fn store(&self, attachment: &NewAttachment) -> Result<InsertOutcome> {
+        let mut connection = self.pool.acquire().await?;
 
-        if result.rows_affected() == 0 {
-            Ok(StoreOutcome::Duplicate)
-        } else {
-            Ok(StoreOutcome::Stored)
-        }
+        insert(&mut connection, attachment).await
     }
 
     /// Reads up to `limit` attachments of one `kind` that are still pending and recent enough.
     ///
     /// Only rows whose message arrived at or after `received_since` (Unix epoch seconds, UTC) are
     /// returned, so the worker's retries stay bounded by a window instead of revisiting old
-    /// attachments forever. The `INNER JOIN` is deliberate: the ingest loop writes a message before
-    /// its attachment, so an attachment without a message row only happens when the message insert
-    /// failed, and such a row cannot be age-bounded.
+    /// attachments forever. The `INNER JOIN` is deliberate: an attachment without a message row is a
+    /// legacy artifact from before [`crate::domains::message::MessageRepository::store`] wrote both
+    /// rows in one transaction, and such a row cannot be age-bounded.
     ///
     /// Must stay in sync with the `attachments` and `messages` tables in `dev/schema.sql`.
     pub async fn pending(
@@ -197,6 +182,37 @@ impl AttachmentRepository {
     }
 }
 
+/// Inserts one row on the caller's connection, so the caller can insert inside its own transaction.
+///
+/// Must stay in sync with the `attachments` table in `dev/schema.sql`: the column order and the
+/// `UNIQUE (chat_id, message_id)` constraint are what make this statement idempotent. The
+/// `transcribed` flag is written as a literal because nothing sets it here.
+pub(crate) async fn insert(
+    connection: &mut SqliteConnection,
+    attachment: &NewAttachment,
+) -> Result<InsertOutcome> {
+    let result = sqlx::query(
+        "INSERT OR IGNORE INTO attachments \
+         (chat_id, message_id, kind, file_id, mime_type, duration_seconds, file_size, transcribed) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
+    )
+    .bind(attachment.chat_id)
+    .bind(attachment.message_id)
+    .bind(attachment.kind.as_str())
+    .bind(attachment.file_id.as_str())
+    .bind(attachment.mime_type.as_deref())
+    .bind(attachment.duration_seconds)
+    .bind(attachment.file_size)
+    .execute(&mut *connection)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        Ok(InsertOutcome::Duplicate)
+    } else {
+        Ok(InsertOutcome::Stored)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::infra::database::Database;
@@ -251,7 +267,7 @@ mod tests {
             .store(&new_attachment())
             .await
             .expect("store should succeed");
-        assert_eq!(outcome, StoreOutcome::Stored);
+        assert_eq!(outcome, InsertOutcome::Stored);
 
         let row = sqlx::query(
             "SELECT chat_id, message_id, kind, file_id, mime_type, duration_seconds, file_size, transcribed FROM attachments",
@@ -284,8 +300,8 @@ mod tests {
             .store(&new_attachment())
             .await
             .expect("second store should be ignored");
-        assert_eq!(first, StoreOutcome::Stored);
-        assert_eq!(second, StoreOutcome::Duplicate);
+        assert_eq!(first, InsertOutcome::Stored);
+        assert_eq!(second, InsertOutcome::Duplicate);
 
         let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM attachments")
             .fetch_one(&repository.pool)
@@ -308,7 +324,7 @@ mod tests {
             .store(&attachment)
             .await
             .expect("store without optional metadata should succeed");
-        assert_eq!(outcome, StoreOutcome::Stored);
+        assert_eq!(outcome, InsertOutcome::Stored);
 
         let row = sqlx::query("SELECT mime_type, duration_seconds, file_size FROM attachments")
             .fetch_one(&repository.pool)
@@ -339,8 +355,8 @@ mod tests {
             .store(&video)
             .await
             .expect("storing video should succeed");
-        assert_eq!(first, StoreOutcome::Stored);
-        assert_eq!(second, StoreOutcome::Stored);
+        assert_eq!(first, InsertOutcome::Stored);
+        assert_eq!(second, InsertOutcome::Stored);
 
         let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM attachments")
             .fetch_one(&repository.pool)

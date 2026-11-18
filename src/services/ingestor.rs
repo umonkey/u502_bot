@@ -1,16 +1,15 @@
 //! Ingest service: reads incoming Telegram messages and stores them.
 //!
-//! This is the loop the `start` command used to run inline, moved behind a type so the command can
-//! compose it with the transcriber and the outbox. The store order, the log lines, and the metrics
-//! are unchanged: this service is the ingest path, and it behaves exactly as it did before the
-//! pipeline was split.
+//! The message and its attachment commit together through [`MessageRepository`], so an attachment
+//! failure leaves neither row. Both are written in one transaction because a later reader age-bounds
+//! an attachment by the message that carries it.
 
 use teloxide::types::{Message, User};
 
 use crate::domains::attachment::{
-    AttachmentKind, AttachmentRepository, NewAttachment, StoreOutcome as AttachmentOutcome,
+    AttachmentKind, InsertOutcome as AttachmentOutcome, NewAttachment,
 };
-use crate::domains::message::{MessageRepository, NewMessage, StoreOutcome};
+use crate::domains::message::{InsertOutcome as MessageOutcome, MessageRepository, NewMessage};
 use crate::infra::sentry;
 use crate::infra::telegram_bot::Messages;
 use crate::services::shutdown::Shutdown;
@@ -20,22 +19,19 @@ use crate::services::wake::Wake;
 pub struct Ingestor {
     messages: Messages,
     messages_repo: MessageRepository,
-    attachments: AttachmentRepository,
     pending_attachments: Wake,
 }
 
 impl Ingestor {
-    /// Creates the service over a message stream and the repositories that own the SQL.
+    /// Creates the service over a message stream and the repository that owns the transaction.
     pub fn new(
         messages: Messages,
         messages_repo: MessageRepository,
-        attachments: AttachmentRepository,
         pending_attachments: Wake,
     ) -> Self {
         Self {
             messages,
             messages_repo,
-            attachments,
             pending_attachments,
         }
     }
@@ -73,8 +69,9 @@ impl Ingestor {
 
     /// Stores one delivered message and, when it carries media, its attachment.
     ///
-    /// The message is written before the attachment, so a later reader can age-bound an attachment
-    /// by the time Telegram reported for the message that carries it.
+    /// Both rows commit together, so an attachment the database rejects leaves no message row
+    /// either. Nothing retries a rolled-back delivery: Telegram acknowledged the update when the
+    /// dispatcher fetched it.
     async fn ingest(&self, message: &Message) {
         sentry::message_received();
         tracing::info!(
@@ -97,42 +94,43 @@ impl Ingestor {
             }
         }
 
-        match self.messages_repo.store(&new_message(message)).await {
-            Ok(StoreOutcome::Stored) => sentry::message_stored(),
-            Ok(StoreOutcome::Duplicate) => {
+        match self
+            .messages_repo
+            .store(&new_message(message), attachment.as_ref())
+            .await
+        {
+            Ok(outcome) => {
                 sentry::message_stored();
-                tracing::info!(
-                    chat_id = message.chat.id.0,
-                    message_id = message.id.0,
-                    "Skipped an already stored message"
-                );
-            }
-            Err(error) => tracing::error!(
-                error = &error as &dyn std::error::Error,
-                "Failed to store the message"
-            ),
-        }
-
-        if let Some(attachment) = &attachment {
-            match self.attachments.store(attachment).await {
-                Ok(AttachmentOutcome::Stored) => {
-                    sentry::attachment_stored();
-                    // The transcriber is idle-waiting on this edge; end its pause now.
-                    self.pending_attachments.notify();
-                }
-                Ok(AttachmentOutcome::Duplicate) => {
-                    sentry::attachment_stored();
+                if outcome.message == MessageOutcome::Duplicate {
                     tracing::info!(
                         chat_id = message.chat.id.0,
                         message_id = message.id.0,
-                        "Skipped an already stored attachment"
+                        "Skipped an already stored message"
                     );
                 }
-                Err(error) => tracing::error!(
-                    error = &error as &dyn std::error::Error,
-                    "Failed to store the attachment"
-                ),
+
+                match outcome.attachment {
+                    Some(AttachmentOutcome::Stored) => {
+                        sentry::attachment_stored();
+                        // The transcriber is idle-waiting on this edge; end its pause now.
+                        self.pending_attachments.notify();
+                    }
+                    Some(AttachmentOutcome::Duplicate) => {
+                        sentry::attachment_stored();
+                        tracing::info!(
+                            chat_id = message.chat.id.0,
+                            message_id = message.id.0,
+                            "Skipped an already stored attachment"
+                        );
+                    }
+                    None => {}
+                }
             }
+            Err(error) => tracing::error!(
+                error = &error as &dyn std::error::Error,
+                has_attachment = attachment.is_some(),
+                "Failed to store the message and its attachment"
+            ),
         }
     }
 }
