@@ -46,7 +46,7 @@ Running `make` without a target executes `check`.
 - `src/infra/config.rs`: `VariableName`, the enum naming every environment variable, plus `get_optional` and `require_secret`; one resolver gives every variable the same form: `<NAME>_FILE` first, then `<NAME>`, the value trimmed, blank meaning unset, UTF-8 only.
 - `src/infra/database.rs`: `Database`, `database_path`, and `SCHEMA`; the async SQLite client, which opens a pooled connection and applies the embedded schema without knowing any table.
 - `src/infra/ffmpeg.rs`: `Ffmpeg`; the client for the `ffmpeg` program, which extracts a video's first audio track to Ogg/Opus under a timeout, kills the child on drop, and records its own call telemetry. The binary path comes from `VariableName::FfmpegPath`; an unusable value, whether non-UTF-8 or an unreadable `FFMPEG_PATH_FILE`, logs one warning and falls back to the `ffmpeg` on `PATH`.
-- `src/infra/openrouter.rs`: `OpenRouter`, `model_from_env`, `DEFAULT_TRANSCRIBE_MODEL`, and `AudioFormat`; the audio transcription client, which records its own call telemetry.
+- `src/infra/openrouter.rs`: `OpenRouter`, `model_from_env`, `DEFAULT_TRANSCRIBE_MODEL`, and `AudioFormat`; the Speech-to-Text client for audio transcription, which records its own call telemetry.
 - `src/infra/sentry.rs`: `VariableName::SentryDsn`, `init` (the `tracing` subscriber, the optional Sentry client, an error layer, and a crate-scoped structured-log layer), and the metric functions for messages, attachments, the outbox, OpenRouter, and ffmpeg.
 - `src/infra/signal.rs`: `Signal` and `wait`; the listener for `SIGINT` and, on Unix, `SIGTERM`.
 - `src/infra/telegram_bot.rs`: `Telegram` and `Messages`, the Telegram client; it receives, downloads, and sends, and knows nothing about storage.
@@ -180,7 +180,7 @@ printf '%s' "$OPENROUTER_API_KEY" > .secrets/openrouter_api_key
 chmod 600 .secrets/openrouter_api_key
 ```
 
-`TRANSCRIBE_CHATS` is ordinary configuration read through `get_optional(VariableName::TranscribeChats)`, with the same file form as everything else: a comma-separated list of numeric chat ids, optional, where empty means "transcribe nothing" and every audio and video attachment is skipped and marked processed. The skip warning carries the chat id, so an operator starts with an empty list, reads the ids from the logs, and adds them. A non-numeric entry still fails startup. `TRANSCRIBE_MODEL_NAME` is optional too and read the same way; when it is unset or empty the compiled-in default `google/gemini-2.5-flash` is used, and startup logs `Using model <id> to transcribe; override with TRANSCRIBE_MODEL_NAME` so the model in use is visible.
+`TRANSCRIBE_CHATS` is ordinary configuration read through `get_optional(VariableName::TranscribeChats)`, with the same file form as everything else: a comma-separated list of numeric chat ids, optional, where empty means "transcribe nothing" and every audio and video attachment is skipped and marked processed. The skip warning carries the chat id, so an operator starts with an empty list, reads the ids from the logs, and adds them. A non-numeric entry still fails startup. `TRANSCRIBE_MODEL_NAME` is optional too and read the same way; when it is unset or empty the compiled-in default `google/gemini-3.5-transcribe` is used, and startup logs `Using model <id> to transcribe; override with TRANSCRIBE_MODEL_NAME` so the model in use is visible.
 
 ## Storage
 

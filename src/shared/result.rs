@@ -53,8 +53,6 @@ pub enum Error {
     HttpStatus { status: u16, body: String },
     /// The response body is not the JSON shape expected.
     ResponseJson(serde_json::Error),
-    /// The response carries no transcript text.
-    MissingTranscript,
     /// The audio file could not be read.
     ReadAudioFile { path: PathBuf, source: io::Error },
 
@@ -123,9 +121,6 @@ impl fmt::Display for Error {
                     "failed to decode the OpenRouter response: {source}"
                 )
             }
-            Self::MissingTranscript => {
-                formatter.write_str("OpenRouter returned no transcript text")
-            }
             Self::ReadAudioFile { path, source } => {
                 write!(
                     formatter,
@@ -173,7 +168,6 @@ impl std::error::Error for Error {
             | Self::InvalidChatId(_)
             | Self::MessageIdOutOfRange(_)
             | Self::HttpStatus { .. }
-            | Self::MissingTranscript
             | Self::FfmpegStatus { .. }
             | Self::NoAudioStream { .. }
             | Self::FfmpegTimeout { .. } => None,

@@ -1,10 +1,11 @@
 //! Transcription service: turns pending attachments into outbox rows.
 //!
-//! The service runs beside the ingestor, so ingestion never waits on an LLM call. Every scan reads
+//! The service runs beside the ingestor, so ingestion never waits on a model call. Every scan reads
 //! a small batch of pending attachments — audio first, then video — whose message is at most an hour
-//! old. An audio attachment is downloaded as-is and sent to OpenRouter; a video attachment is
-//! downloaded, its audio track is extracted with ffmpeg, and the resulting Ogg joins the audio flow.
-//! Either way the transcript is queued in the outbox and the attachment is marked processed.
+//! old. An audio attachment is downloaded as-is and sent to OpenRouter's Speech-to-Text API; a video
+//! attachment is downloaded, its audio track is extracted with ffmpeg, and the resulting Ogg joins
+//! the audio flow. Either way the transcript is queued in the outbox and the attachment is marked
+//! processed.
 //!
 //! The one-hour window bounds both cost and retries: a file that keeps failing is retried on every
 //! scan until its message ages out, and then left alone. [`VariableName::TranscribeChats`] limits
@@ -25,9 +26,6 @@ use crate::infra::telegram_bot::Telegram;
 use crate::services::shutdown::Shutdown;
 use crate::services::unix_now;
 use crate::shared::result::{Error, Result};
-
-/// Instruction sent with every file; it asks for a verbatim transcript and nothing else.
-const TRANSCRIPTION_PROMPT: &str = "Transcribe this voice message verbatim in the language it is spoken. Return only the transcript: no commentary, no timestamps, no speaker labels, no translation. If there is no speech, return an empty string.";
 
 /// Plain-text header placed above the transcript in the first reply.
 const REPLY_HEADER: &str = "Message transcript:";
@@ -289,7 +287,6 @@ impl Transcriber {
         let transcribed = tokio::select! {
             result = self.openrouter.transcribe_audio(
                 &path,
-                TRANSCRIPTION_PROMPT,
                 AudioFormat::from_mime_type(attachment.mime_type.as_deref()),
             ) => result,
             () = shutdown.wait() => return false,
@@ -365,11 +362,7 @@ impl Transcriber {
         }
 
         let transcribed = tokio::select! {
-            result = self.openrouter.transcribe_audio(
-                &audio,
-                TRANSCRIPTION_PROMPT,
-                AudioFormat::Ogg,
-            ) => result,
+            result = self.openrouter.transcribe_audio(&audio, AudioFormat::Ogg) => result,
             () = shutdown.wait() => return false,
         };
         let transcript = match transcribed {

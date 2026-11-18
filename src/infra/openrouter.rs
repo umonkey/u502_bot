@@ -1,9 +1,9 @@
-//! OpenRouter transcription client.
+//! OpenRouter speech-to-text client.
 //!
-//! [`OpenRouter::transcribe_audio`] sends one audio file to OpenRouter's Chat Completions endpoint
-//! and returns the transcript. Chat Completions is used rather than the Responses API because its
-//! `input_audio.format` accepts any provider-supported container name, so a Telegram voice note's
-//! `ogg` needs no transcode step.
+//! [`OpenRouter::transcribe_audio`] sends one audio file to OpenRouter's Speech-to-Text endpoint and
+//! returns the transcript. That endpoint is used because it is what serves a transcription model:
+//! `input_audio` carries the base64 bytes of the file, and the caller declares the container format
+//! alongside them, so a Telegram voice note's `ogg` needs no transcode step.
 //!
 //! The caller declares the [`AudioFormat`] because the caller is what knows the bytes: the audio
 //! branch sends the downloaded file untouched and maps its MIME type, while the video branch
@@ -25,16 +25,13 @@ use crate::infra::sentry;
 use crate::shared::result::{Error, Result};
 
 /// Model used when [`VariableName::TranscribeModelName`] is unset or empty.
-pub const DEFAULT_TRANSCRIBE_MODEL: &str = "google/gemini-2.5-flash";
+pub const DEFAULT_TRANSCRIBE_MODEL: &str = "google/gemini-3.5-transcribe";
 
-/// Chat Completions endpoint.
-const ENDPOINT: &str = "https://openrouter.ai/api/v1/chat/completions";
+/// Speech-to-Text endpoint.
+const ENDPOINT: &str = "https://openrouter.ai/api/v1/audio/transcriptions";
 
 /// Request timeout: long enough for a slow model, short enough to bound a stuck call.
 const TIMEOUT: Duration = Duration::from_secs(120);
-
-/// Output cap for one transcription.
-const MAX_TOKENS: u32 = 4_096;
 
 /// Characters of an error body kept for the logs.
 const MAX_ERROR_BODY: usize = 500;
@@ -121,7 +118,7 @@ impl AudioFormat {
     }
 }
 
-/// Client for OpenRouter's Chat Completions endpoint.
+/// Client for OpenRouter's Speech-to-Text endpoint.
 pub struct OpenRouter {
     client: reqwest::Client,
     api_key: String,
@@ -155,26 +152,21 @@ impl OpenRouter {
     /// Transcribes one audio file and returns the text the model produced.
     ///
     /// The file is read whole and base64-encoded, because that is what `input_audio` carries. One
-    /// request, one choice, no tools, bounded output, and reasoning disabled keep it a single turn.
-    /// `format` describes the bytes the caller wrote; nothing here transcodes.
+    /// request, one transcript, no options that would change the answer. `format` describes the
+    /// bytes the caller wrote; nothing here transcodes.
     /// The call counter and duration are recorded on every path; usage is recorded only when
     /// OpenRouter reports it. Failures are returned so the caller can log them with context.
-    pub async fn transcribe_audio(
-        &self,
-        path: &Path,
-        prompt: &str,
-        format: AudioFormat,
-    ) -> Result<String> {
+    pub async fn transcribe_audio(&self, path: &Path, format: AudioFormat) -> Result<String> {
         let started = Instant::now();
-        let result = self.request(path, prompt, format).await;
+        let result = self.request(path, format).await;
         let elapsed = started.elapsed();
         sentry::llm_call(elapsed);
 
         let (text, usage) = result?;
         if let Some(usage) = usage {
             sentry::llm_usage(
-                usage.prompt_tokens,
-                usage.completion_tokens,
+                usage.input_tokens,
+                usage.output_tokens,
                 usage.cost_micro_usd(),
             );
         }
@@ -183,8 +175,8 @@ impl OpenRouter {
         tracing::info!(
             model = %self.model,
             duration_ms = elapsed.as_millis() as u64,
-            input_tokens = usage.prompt_tokens,
-            output_tokens = usage.completion_tokens,
+            input_tokens = usage.input_tokens,
+            output_tokens = usage.output_tokens,
             cost_micro_usd = usage.cost_micro_usd(),
             "Transcribed audio",
         );
@@ -192,12 +184,7 @@ impl OpenRouter {
         Ok(text)
     }
 
-    async fn request(
-        &self,
-        path: &Path,
-        prompt: &str,
-        format: AudioFormat,
-    ) -> Result<(String, Option<Usage>)> {
+    async fn request(&self, path: &Path, format: AudioFormat) -> Result<(String, Option<Usage>)> {
         let audio = tokio::fs::read(path)
             .await
             .map_err(|source| Error::ReadAudioFile {
@@ -208,23 +195,12 @@ impl OpenRouter {
         let data = STANDARD.encode(audio);
         let request = Request {
             model: &self.model,
-            messages: [Message {
-                role: "user",
-                content: [
-                    Content::Text { text: prompt },
-                    Content::Audio {
-                        input_audio: InputAudio {
-                            data: &data,
-                            // The caller downloaded or extracted these bytes, so it knows the format.
-                            format: format.as_str(),
-                        },
-                    },
-                ],
-            }],
+            input_audio: InputAudio {
+                data: &data,
+                // The caller downloaded or extracted these bytes, so it knows the format.
+                format: format.as_str(),
+            },
             temperature: 0,
-            max_tokens: MAX_TOKENS,
-            // Models that declare reasoning mandatory reject this field; drop it for those.
-            reasoning: Reasoning { enabled: false },
         };
 
         let response = self
@@ -249,29 +225,12 @@ impl OpenRouter {
     }
 }
 
-/// One Chat Completions request: a single user turn with the prompt and the audio.
+/// One Speech-to-Text request: the model and the audio it should transcribe.
 #[derive(Serialize)]
 struct Request<'a> {
     model: &'a str,
-    messages: [Message<'a>; 1],
+    input_audio: InputAudio<'a>,
     temperature: u8,
-    max_tokens: u32,
-    reasoning: Reasoning,
-}
-
-#[derive(Serialize)]
-struct Message<'a> {
-    role: &'static str,
-    content: [Content<'a>; 2],
-}
-
-#[derive(Serialize)]
-#[serde(tag = "type")]
-enum Content<'a> {
-    #[serde(rename = "text")]
-    Text { text: &'a str },
-    #[serde(rename = "input_audio")]
-    Audio { input_audio: InputAudio<'a> },
 }
 
 #[derive(Serialize)]
@@ -280,38 +239,23 @@ struct InputAudio<'a> {
     format: &'static str,
 }
 
-#[derive(Serialize)]
-struct Reasoning {
-    enabled: bool,
-}
-
-/// The part of a Chat Completions response this module reads.
+/// The part of a Speech-to-Text response this module reads.
 #[derive(Deserialize)]
 struct Response {
-    #[serde(default)]
-    choices: Vec<Choice>,
+    /// Required by serde: an absent `text` means the body is not the shape expected. An empty
+    /// string is valid, because a silent attachment legitimately transcribes to nothing.
+    text: String,
     #[serde(default)]
     usage: Option<Usage>,
-}
-
-#[derive(Deserialize)]
-struct Choice {
-    message: ResponseMessage,
-}
-
-#[derive(Deserialize)]
-struct ResponseMessage {
-    #[serde(default)]
-    content: Option<String>,
 }
 
 /// Token and cost accounting OpenRouter reports for a call.
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 struct Usage {
     #[serde(default)]
-    prompt_tokens: u64,
+    input_tokens: u64,
     #[serde(default)]
-    completion_tokens: u64,
+    output_tokens: u64,
     /// Credits in USD.
     #[serde(default)]
     cost: f64,
@@ -325,18 +269,13 @@ impl Usage {
 }
 
 /// Reads the transcript and usage out of a successful response body.
+///
+/// The text is returned verbatim: trimming, and treating an empty transcript as "no speech", is the
+/// caller's decision.
 fn parse_response(body: &str) -> Result<(String, Option<Usage>)> {
     let response: Response = serde_json::from_str(body)?;
 
-    let text = response
-        .choices
-        .first()
-        .and_then(|choice| choice.message.content.as_deref())
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .ok_or(Error::MissingTranscript)?;
-
-    Ok((text.to_owned(), response.usage))
+    Ok((response.text, response.usage))
 }
 
 /// Keeps at most [`MAX_ERROR_BODY`] characters of an error body, on a character boundary.
@@ -437,26 +376,28 @@ mod tests {
     #[test]
     fn response_yields_the_transcript_and_usage() {
         let body = r#"{
-            "id": "gen-1",
-            "model": "google/gemini-2.5-flash",
-            "choices": [
-                { "index": 0, "message": { "role": "assistant", "content": "Привет, мир" }, "finish_reason": "stop" }
-            ],
-            "usage": { "prompt_tokens": 1200, "completion_tokens": 42, "total_tokens": 1242, "cost": 0.000123 }
+            "text": "Привет, мир",
+            "usage": {
+                "input_tokens": 1200,
+                "output_tokens": 42,
+                "total_tokens": 1242,
+                "seconds": 3,
+                "cost": 0.000123
+            }
         }"#;
 
         let (text, usage) = parse_response(body).expect("response should parse");
         assert_eq!(text, "Привет, мир");
 
         let usage = usage.expect("usage should be present");
-        assert_eq!(usage.prompt_tokens, 1_200);
-        assert_eq!(usage.completion_tokens, 42);
+        assert_eq!(usage.input_tokens, 1_200);
+        assert_eq!(usage.output_tokens, 42);
         assert_eq!(usage.cost_micro_usd(), 123.0);
     }
 
     #[test]
     fn response_without_usage_still_yields_the_transcript() {
-        let body = r#"{ "choices": [{ "message": { "content": "hi" } }] }"#;
+        let body = r#"{ "text": "hi" }"#;
 
         let (text, usage) = parse_response(body).expect("response should parse");
         assert_eq!(text, "hi");
@@ -464,15 +405,23 @@ mod tests {
     }
 
     #[test]
-    fn response_without_content_is_rejected() {
+    fn an_empty_transcript_is_returned_as_is() {
+        let body = r#"{ "text": "" }"#;
+
+        let (text, usage) = parse_response(body).expect("an empty transcript should parse");
+        assert!(text.is_empty(), "text {text:?}");
+        assert!(usage.is_none());
+    }
+
+    #[test]
+    fn response_without_text_is_rejected() {
         for body in [
-            r#"{ "choices": [{ "message": { "content": null } }] }"#,
-            r#"{ "choices": [{ "message": { "content": "   " } }] }"#,
-            r#"{ "choices": [] }"#,
+            r#"{ "usage": { "input_tokens": 1200 } }"#,
+            r#"{ "text": null }"#,
             r#"{}"#,
         ] {
             assert!(
-                matches!(parse_response(body), Err(Error::MissingTranscript)),
+                matches!(parse_response(body), Err(Error::ResponseJson(_))),
                 "body {body}"
             );
         }
@@ -500,7 +449,7 @@ mod tests {
         let path = std::env::temp_dir().join("u502-openrouter-missing-audio");
 
         let error = client
-            .transcribe_audio(&path, "Transcribe.", AudioFormat::Ogg)
+            .transcribe_audio(&path, AudioFormat::Ogg)
             .await
             .expect_err("missing file should not transcribe");
         match error {
