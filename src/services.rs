@@ -7,7 +7,8 @@
 //! composition lives in `src/cli/`.
 //!
 //! The module also carries [`shutdown::Shutdown`], the stop signal the services share, so a command
-//! can ask every loop to end without knowing how any of them is written.
+//! can ask every loop to end without knowing how any of them is written, and [`wake::Wake`], the
+//! one-way pulse a service sends a peer when it creates work, so an idle pause ends at once.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -15,6 +16,7 @@ pub mod ingestor;
 pub mod outbox;
 pub mod shutdown;
 pub mod transcriber;
+pub mod wake;
 
 /// Current Unix time in seconds, UTC, which is how the schema stores every timestamp.
 pub(crate) fn unix_now() -> i64 {

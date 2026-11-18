@@ -17,7 +17,7 @@ transcribed.
 Run transcription as its own long-running task, beside receiving and delivery. It reads a small batch
 of pending audio whose message is recent, downloads each file to a temporary location, asks the model
 for a verbatim transcript, queues the text, and marks the attachment processed. It pauses when a scan
-finds nothing to do.
+finds nothing to do, and the ingestor ends that pause at once when it stores a new attachment.
 
 Bound the work by a one-hour window on the age of the message, so a failing file is retried only
 while its message is recent. Treat "processed" as the flag that ends the work on every path,

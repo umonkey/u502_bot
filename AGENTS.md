@@ -53,6 +53,7 @@ Running `make` without a target executes `check`.
 - `src/infra/telegram_bot.rs`: `Telegram` and `Messages`, the Telegram client; it receives, downloads, reacts, and sends, and knows nothing about storage.
 - `src/services.rs`: declares the long-running services, the shutdown flag they share, and their shared clock.
 - `src/services/shutdown.rs`: `Shutdown`, the sticky cooperative flag that stops every service on one request.
+- `src/services/wake.rs`: `Wake`, the one-way pulse a service sends another when it creates work, which ends the receiver's idle pause early.
 - `src/services/ingestor.rs`: the message loop; it stores every delivered message and its attachment metadata, drains what the dispatcher already queued, then stops polling.
 - `src/services/transcriber.rs`: the transcription loop for audio and video and the `TRANSCRIBE_CHATS` whitelist; it processes an audio batch, then a video batch, and a video is downloaded and reduced with `ffmpeg` before it joins the audio flow.
 - `src/services/outbox.rs`: the delivery loop; it sends queued replies and marks them sent.
@@ -103,7 +104,7 @@ docker compose up -d           # start detached
 
 ## Shutdown
 
-`SIGINT` (Ctrl-C) and `SIGTERM` (Compose, Docker, supervisord) both request one cooperative shutdown: the signal listener sets a sticky flag, and each service checks it at a work boundary. The Telegram dispatcher closes its channel, the ingestor stores what the dispatcher had already queued and then stops polling, and the transcriber and the outbox abandon idle pauses and in-flight downloads, model calls, and sends; a download or transcription that is abandoned is retried on the next start, and an interrupted send may duplicate one reply. Database writes already started are never cancelled. After the services end, `start` closes the pool and then returns, so the Sentry guard flushes; a graceful stop exits with success. `stop_grace_period: 20s` in `compose.yaml` and `stopwaitsecs=15` in `docker/supervisord.conf` bound the wait, and supervisord forwards its own `SIGTERM` to the bot, which never sees the Compose signal directly.
+`SIGINT` (Ctrl-C) and `SIGTERM` (Compose, Docker, supervisord) both request one cooperative shutdown: the signal listener sets a sticky flag, and each service checks it at a work boundary. The Telegram dispatcher closes its channel, the ingestor stores what the dispatcher had already queued and then stops polling, and the transcriber and the outbox abandon idle pauses and in-flight downloads, model calls, and sends; a download or transcription that is abandoned is retried on the next start, and an interrupted send may duplicate one reply. Database writes already started are never cancelled. After the services end, `start` closes the pool and then returns, so the Sentry guard flushes; a graceful stop exits with success. `stop_grace_period: 20s` in `compose.yaml` and `stopwaitsecs=15` in `docker/supervisord.conf` bound the wait, and supervisord forwards its own `SIGTERM` to the bot, which never sees the Compose signal directly. The transcriber and the outbox also stop pausing when work arrives: the ingestor pulses the transcriber when it stores an attachment, and the transcriber pulses the outbox when it queues a reply.
 
 ## Architecture decisions
 
@@ -121,6 +122,7 @@ Architecture decisions live in `docs/adr/`, one Markdown file per decision, name
 - ADR 0010 records the decision to stop the bot gracefully on a signal.
 - ADR 0011 records the decision to extract a video's audio track with ffmpeg before transcribing it.
 - ADR 0012 records the decision to keep one crate-wide error enum and one `Result` alias.
+- ADR 0013 records the decision to wake an idle service instead of waiting out its pause.
 
 Run `make format-docs` after editing anything under `docs/`.
 

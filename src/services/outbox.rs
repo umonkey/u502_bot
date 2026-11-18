@@ -12,6 +12,7 @@ use crate::infra::sentry;
 use crate::infra::telegram_bot::Telegram;
 use crate::services::shutdown::Shutdown;
 use crate::services::unix_now;
+use crate::services::wake::Wake;
 
 /// Rows read per scan.
 const BATCH: i64 = 10;
@@ -26,22 +27,30 @@ const IDLE: Duration = Duration::from_secs(5);
 pub struct Outbox {
     telegram: Telegram,
     repository: OutboxRepository,
+    pending_replies: Wake,
 }
 
 impl Outbox {
     /// Creates the service over the client and the repository the command composed.
-    pub fn new(telegram: Telegram, repository: OutboxRepository) -> Self {
+    pub fn new(telegram: Telegram, repository: OutboxRepository, pending_replies: Wake) -> Self {
         Self {
             telegram,
             repository,
+            pending_replies,
         }
     }
 
     /// Delivers queued messages until shutdown is requested, pausing only when there is nothing to
     /// do.
-    pub async fn run(self, mut shutdown: Shutdown) {
+    ///
+    /// The pause ends early when the transcriber queues a reply, so a fresh transcript does not
+    /// wait out [`IDLE`]. The [`SEND_DELAY`] between two sends is untouched: a pulse there stays
+    /// pending and the next scan reads the rows anyway.
+    pub async fn run(mut self, mut shutdown: Shutdown) {
         while !shutdown.is_requested() {
-            if !self.tick(&mut shutdown).await && !shutdown.sleep(IDLE).await {
+            if !self.tick(&mut shutdown).await
+                && !self.pending_replies.sleep(IDLE, &mut shutdown).await
+            {
                 break;
             }
         }

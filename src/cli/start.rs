@@ -17,6 +17,7 @@ use crate::services::ingestor::Ingestor;
 use crate::services::outbox::Outbox;
 use crate::services::shutdown::Shutdown;
 use crate::services::transcriber::{Transcriber, Whitelist};
+use crate::services::wake::Wake;
 use crate::shared::result::Result;
 
 pub async fn run() -> ExitCode {
@@ -74,10 +75,18 @@ async fn start() -> Result<(), ExitCode> {
     )?;
 
     let pool = database.pool().clone();
+
+    // One edge per pair of services: the ingestor wakes the transcriber when it stores an
+    // attachment, and the transcriber wakes the outbox when it queues a reply. The two handles are
+    // never shared, so neither consumer observes the other's work.
+    let pending_attachments = Wake::new();
+    let pending_replies = Wake::new();
+
     let ingestor = Ingestor::new(
         telegram.messages(),
         MessageRepository::new(pool.clone()),
         AttachmentRepository::new(pool.clone()),
+        pending_attachments.clone(),
     );
     let transcriber = Transcriber::new(
         telegram.clone(),
@@ -86,8 +95,10 @@ async fn start() -> Result<(), ExitCode> {
         AttachmentRepository::new(pool.clone()),
         OutboxRepository::new(pool.clone()),
         chats,
+        pending_attachments,
+        pending_replies.clone(),
     );
-    let outbox = Outbox::new(telegram, OutboxRepository::new(pool));
+    let outbox = Outbox::new(telegram, OutboxRepository::new(pool), pending_replies);
 
     let (ingestor, transcriber, outbox) = tokio::join!(
         tokio::spawn(ingestor.run(shutdown.clone())),

@@ -27,6 +27,7 @@ use crate::infra::sentry;
 use crate::infra::telegram_bot::Telegram;
 use crate::services::shutdown::Shutdown;
 use crate::services::unix_now;
+use crate::services::wake::Wake;
 use crate::shared::result::{Error, Result};
 
 /// Plain-text header placed above the transcript in the first reply.
@@ -124,10 +125,15 @@ pub struct Transcriber {
     attachments: AttachmentRepository,
     outbox: OutboxRepository,
     chats: Whitelist,
+    pending_attachments: Wake,
+    pending_replies: Wake,
 }
 
 impl Transcriber {
     /// Creates the service over the clients and repositories the command composed.
+    // One parameter per client, repository, whitelist, and wake edge: the wiring is the whole
+    // constructor, so grouping the inputs would only hide it.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         telegram: Telegram,
         openrouter: OpenRouter,
@@ -135,6 +141,8 @@ impl Transcriber {
         attachments: AttachmentRepository,
         outbox: OutboxRepository,
         chats: Whitelist,
+        pending_attachments: Wake,
+        pending_replies: Wake,
     ) -> Self {
         Self {
             telegram,
@@ -143,14 +151,21 @@ impl Transcriber {
             attachments,
             outbox,
             chats,
+            pending_attachments,
+            pending_replies,
         }
     }
 
     /// Transcribes pending attachments until shutdown is requested, pausing only when there is
     /// nothing to do.
-    pub async fn run(self, mut shutdown: Shutdown) {
+    ///
+    /// The pause ends early when the ingestor stores an attachment, so a fresh voice note or video
+    /// does not wait out [`IDLE`]; a failing attachment is still retried on the pause's cadence.
+    pub async fn run(mut self, mut shutdown: Shutdown) {
         while !shutdown.is_requested() {
-            if !self.tick(&mut shutdown).await && !shutdown.sleep(IDLE).await {
+            if !self.tick(&mut shutdown).await
+                && !self.pending_attachments.sleep(IDLE, &mut shutdown).await
+            {
                 break;
             }
         }
@@ -447,6 +462,9 @@ impl Transcriber {
 
             self.outbox.enqueue(&message).await?;
             sentry::outbox_added();
+            // The outbox is idle-waiting on this edge; one pulse per written row is enough, because
+            // a pulse already pending is not lost and the next scan reads every row anyway.
+            self.pending_replies.notify();
         }
 
         Ok(())

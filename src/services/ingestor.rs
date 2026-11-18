@@ -14,12 +14,14 @@ use crate::domains::message::{MessageRepository, NewMessage, StoreOutcome};
 use crate::infra::sentry;
 use crate::infra::telegram_bot::Messages;
 use crate::services::shutdown::Shutdown;
+use crate::services::wake::Wake;
 
 /// Reads incoming Telegram messages and stores each one with its attachment.
 pub struct Ingestor {
     messages: Messages,
     messages_repo: MessageRepository,
     attachments: AttachmentRepository,
+    pending_attachments: Wake,
 }
 
 impl Ingestor {
@@ -28,11 +30,13 @@ impl Ingestor {
         messages: Messages,
         messages_repo: MessageRepository,
         attachments: AttachmentRepository,
+        pending_attachments: Wake,
     ) -> Self {
         Self {
             messages,
             messages_repo,
             attachments,
+            pending_attachments,
         }
     }
 
@@ -111,7 +115,11 @@ impl Ingestor {
 
         if let Some(attachment) = &attachment {
             match self.attachments.store(attachment).await {
-                Ok(AttachmentOutcome::Stored) => sentry::attachment_stored(),
+                Ok(AttachmentOutcome::Stored) => {
+                    sentry::attachment_stored();
+                    // The transcriber is idle-waiting on this edge; end its pause now.
+                    self.pending_attachments.notify();
+                }
                 Ok(AttachmentOutcome::Duplicate) => {
                     sentry::attachment_stored();
                     tracing::info!(

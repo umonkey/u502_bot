@@ -27,6 +27,8 @@ Some attachments are marked processed without a transcript, because a retry coul
 
 A download or model failure is retried on every scan while the source message is at most an hour old. The one-hour window bounds both the cost of a failing attachment and the number of retries; an attachment that ages out is never transcribed later.
 
+The loop pauses only when a scan finds nothing to transcribe, and storing a new attachment ends that pause at once. A failed attachment is still retried on the pause's cadence, rather than immediately.
+
 ## Model selection
 
 The default model is `google/gemini-3.5-transcribe`. `TRANSCRIBE_MODEL_NAME` overrides it, and an empty value falls back to the default. Startup logs `Using model <id> to transcribe; override with TRANSCRIBE_MODEL_NAME` once, so the model that spends the credits is visible in the console and in Sentry's structured logs.
