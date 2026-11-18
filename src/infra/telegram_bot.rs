@@ -11,7 +11,7 @@ use std::path::Path;
 use teloxide::dptree;
 use teloxide::net::Download;
 use teloxide::prelude::*;
-use teloxide::types::{FileId, MessageId, ReplyParameters};
+use teloxide::types::{FileId, MessageId, ParseMode, ReplyParameters};
 use tokio::sync::mpsc;
 
 /// Handle over the messages the Telegram dispatcher delivers.
@@ -80,13 +80,18 @@ impl Telegram {
     }
 
     /// Sends `text` to `chat_id`, answering `reply_to` when it is set.
+    ///
+    /// `text` is Telegram HTML, already escaped by the producer; this method only forwards it.
     pub async fn send(
         &self,
         chat_id: i64,
         text: &str,
         reply_to: Option<i64>,
     ) -> Result<(), TelegramError> {
-        let mut request = self.bot.send_message(ChatId(chat_id), text);
+        let mut request = self
+            .bot
+            .send_message(ChatId(chat_id), text)
+            .parse_mode(ParseMode::Html);
 
         if let Some(reply) = reply_parameters(reply_to)? {
             request = request.reply_parameters(reply);

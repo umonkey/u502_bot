@@ -26,6 +26,9 @@ use crate::services::unix_now;
 /// Instruction sent with every file; it asks for a verbatim transcript and nothing else.
 const TRANSCRIPTION_PROMPT: &str = "Transcribe this voice message verbatim in the language it is spoken. Return only the transcript: no commentary, no timestamps, no speaker labels, no translation. If there is no speech, return an empty string.";
 
+/// Plain-text header placed above the transcript in the first reply.
+const REPLY_HEADER: &str = "Message transcript:";
+
 /// Environment variable holding the comma-separated list of chats to transcribe.
 const TRANSCRIBE_CHATS: &str = "TRANSCRIBE_CHATS";
 
@@ -38,7 +41,11 @@ const BATCH: i64 = 10;
 /// Pause after a scan that found nothing, or that could not do any work.
 const IDLE: Duration = Duration::from_secs(5);
 
-/// Maximum characters per outbox row: Telegram rejects a message longer than 4096.
+/// Maximum visible characters per outbox row: Telegram rejects a message longer than 4096.
+///
+/// The limit budgets the text Telegram counts after entity parsing, not the markup, so chunking
+/// stays on the raw transcript and escaping is applied per chunk, where a chunk boundary can never
+/// split a tag.
 const CHUNK_LIMIT: usize = 4_000;
 
 /// The chats whose audio is transcribed.
@@ -276,7 +283,7 @@ impl Transcriber {
                 chat_id: attachment.chat_id,
                 thread_id: (index == 0).then_some(attachment.message_id),
                 added_at: now,
-                message: chunk.to_owned(),
+                message: reply_html(chunk, index == 0),
             };
 
             self.outbox.enqueue(&message).await?;
@@ -316,6 +323,31 @@ fn log_failure(attachment: &PendingAudio, error: &(dyn std::error::Error + 'stat
         error = error,
         "Failed to process an audio attachment"
     );
+}
+
+/// Escapes the characters Telegram's HTML parse mode treats as markup.
+///
+/// The ampersand is replaced first, so the entities introduced by the later replacements are not
+/// escaped twice. Everything else is left untouched.
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Renders one chunk as Telegram HTML: the header above the transcript, the transcript quoted.
+///
+/// Only the first chunk carries [`REPLY_HEADER`]; the rest are the bare blockquote. The transcript
+/// is escaped, so its content can never inject markup.
+fn reply_html(chunk: &str, first: bool) -> String {
+    if first {
+        format!(
+            "{REPLY_HEADER}\n\n<blockquote>{}</blockquote>",
+            escape_html(chunk)
+        )
+    } else {
+        format!("<blockquote>{}</blockquote>", escape_html(chunk))
+    }
 }
 
 /// Splits `text` into pieces of at most `limit` bytes without cutting a character in half.
@@ -387,6 +419,43 @@ mod tests {
             Err(WhitelistError::NotANumber(token)) => assert_eq!(token, "two"),
             other => panic!("expected a non-numeric entry, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn escape_html_escapes_markup_characters() {
+        assert_eq!(escape_html("&"), "&amp;");
+        assert_eq!(escape_html("<"), "&lt;");
+        assert_eq!(escape_html(">"), "&gt;");
+    }
+
+    #[test]
+    fn escape_html_escapes_the_ampersand_first() {
+        assert_eq!(escape_html("a & b < c > d"), "a &amp; b &lt; c &gt; d");
+        assert_eq!(escape_html("&lt;"), "&amp;lt;");
+    }
+
+    #[test]
+    fn reply_html_renders_the_first_chunk_with_the_header() {
+        assert_eq!(
+            reply_html("Hello guys I am leaving", true),
+            "Message transcript:\n\n<blockquote>Hello guys I am leaving</blockquote>"
+        );
+    }
+
+    #[test]
+    fn reply_html_renders_a_continuation_chunk_without_the_header() {
+        assert_eq!(
+            reply_html("and another thing", false),
+            "<blockquote>and another thing</blockquote>"
+        );
+    }
+
+    #[test]
+    fn reply_html_renders_a_transcript_containing_markup_inert() {
+        assert_eq!(
+            reply_html("</blockquote><b>x</b>", true),
+            "Message transcript:\n\n<blockquote>&lt;/blockquote&gt;&lt;b&gt;x&lt;/b&gt;</blockquote>"
+        );
     }
 
     #[test]

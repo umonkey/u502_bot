@@ -2,7 +2,8 @@
 //!
 //! A reply is queued as an outbox row instead of being sent inline, so a restart cannot lose it; a
 //! separate service delivers the unsent rows and marks them sent. The row type stays independent of
-//! Telegram: the producer maps its text into [`NewOutboxMessage`] before enqueueing.
+//! Telegram: the producer maps its text into [`NewOutboxMessage`] before enqueueing. The stored text
+//! is escaped Telegram HTML, because the sender posts every row with `ParseMode::Html`.
 //! [`OutboxRepository`] must stay in sync with the `outbox` table in `dev/schema.sql`.
 
 use std::fmt;
@@ -18,7 +19,7 @@ pub struct NewOutboxMessage {
     pub thread_id: Option<i64>,
     /// Enqueue time as Unix epoch seconds, UTC.
     pub added_at: i64,
-    /// Text to deliver.
+    /// Text to deliver: escaped Telegram HTML, rendered by the producer.
     pub message: String,
 }
 
@@ -31,7 +32,7 @@ pub struct PendingMessage {
     pub chat_id: i64,
     /// Telegram message id the delivery replies to; `None` for a plain message.
     pub thread_id: Option<i64>,
-    /// Text to deliver.
+    /// Text to deliver: escaped Telegram HTML, rendered by the producer.
     pub message: String,
 }
 
