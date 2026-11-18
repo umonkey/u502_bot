@@ -58,6 +58,7 @@ Running `make` without a target executes `check`.
 - `src/services/transcriber.rs`: the transcription loop for audio and video and the `TRANSCRIBE_CHATS` whitelist; it processes an audio batch, then a video batch, and a video is downloaded and reduced with `ffmpeg` before it joins the audio flow.
 - `src/services/outbox.rs`: the delivery loop; it sends queued replies and marks them sent.
 - `src/shared.rs` / `src/shared/result.rs`: the crate-wide `Error` enum, with one variant per failure mode the bot can produce, and the `Result<T>` alias every fallible function returns; any layer may use them.
+- `src/shared/metrics.rs`: `MetricName`, the enum naming every application metric the bot records, with the exact Sentry wire name behind `as_str`; recording stays in `src/infra/sentry.rs`, which owns the client.
 - `dev/schema.sql`: initial SQLite schema, embedded at build time and applied on every startup.
 
 Add every new subcommand as a variant of the `Command` enum in `src/cli/mod.rs`, route it from `run()`, and implement it in `src/cli/<command>.rs`.
