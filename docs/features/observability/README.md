@@ -27,6 +27,11 @@ Application counters and timings are recorded as Sentry metrics. The pairs are m
 - `transcription.reply.latency`: a distribution in seconds from the Telegram send time of the source message to the moment Telegram accepts the reply. One sample is recorded per first reply chunk; Telegram's start time is whole seconds and includes the host-to-Telegram clock skew, so a persistent negative value means the host clock is ahead of Telegram's; and after a restart messages up to an hour old are still transcribed, so catch-up transcripts produce large samples
 - `openrouter.calls` and `openrouter.duration` for every call, successful or not, plus `openrouter.tokens.input`, `openrouter.tokens.output`, and `openrouter.cost_micro_usd` from the usage OpenRouter reports; cost is in micro-USD
 - `ffmpeg.calls` and `ffmpeg.duration` for every extraction, successful or timed out, so the video path is visible even when it never reaches the model
+- `telegram.messages.pruned`: every message one pruning statement deleted
+- `telegram.attachments.pruned`: every attachment one pruning statement deleted, including a legacy row whose message is already gone
+- `outbox.messages.pruned`: every delivered outbox row one pruning statement deleted; an unsent row is never touched
+
+A pruning statement that deletes nothing records nothing, so the three prune counters do not fill with zeros.
 
 No metric carries attributes.
 

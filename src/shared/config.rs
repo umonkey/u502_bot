@@ -23,6 +23,8 @@ pub enum VariableName {
     TranscribeChats,
     /// `TRANSCRIBE_MODEL_NAME`: the transcription model; optional, with a compiled-in default.
     TranscribeModelName,
+    /// `RETENTION_DAYS`: how many days of rows to keep; optional, `0` keeps every row, unset keeps 30 days.
+    RetentionDays,
 }
 
 /// What the environment said about Sentry: a destination, or the reason reporting is off.
@@ -43,6 +45,7 @@ impl VariableName {
             Self::DatabasePath => "DATABASE_PATH",
             Self::TranscribeChats => "TRANSCRIBE_CHATS",
             Self::TranscribeModelName => "TRANSCRIBE_MODEL_NAME",
+            Self::RetentionDays => "RETENTION_DAYS",
         }
     }
 
@@ -55,6 +58,7 @@ impl VariableName {
             Self::DatabasePath => "DATABASE_PATH_FILE",
             Self::TranscribeChats => "TRANSCRIBE_CHATS_FILE",
             Self::TranscribeModelName => "TRANSCRIBE_MODEL_NAME_FILE",
+            Self::RetentionDays => "RETENTION_DAYS_FILE",
         }
     }
 }
@@ -80,6 +84,7 @@ mod tests {
             (VariableName::DatabasePath, "DATABASE_PATH"),
             (VariableName::TranscribeChats, "TRANSCRIBE_CHATS"),
             (VariableName::TranscribeModelName, "TRANSCRIBE_MODEL_NAME"),
+            (VariableName::RetentionDays, "RETENTION_DAYS"),
         ];
 
         for (name, key) in cases {
@@ -104,6 +109,7 @@ mod tests {
             VariableName::DatabasePath,
             VariableName::TranscribeChats,
             VariableName::TranscribeModelName,
+            VariableName::RetentionDays,
         ];
 
         for name in names {

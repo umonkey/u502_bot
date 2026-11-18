@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Amended: 2026-11-18, to record rendering, batching, the source-time join, and producer atomicity.
+- Amended: 2026-11-18, to record the retention and pruning service.
 - Date: 2026-11-17
 
 ## Context
@@ -38,7 +39,9 @@ transaction, the marker first. A run that finds the marker already set queues no
 - a record the platform rejects forever is retried on every pass, because nothing counts attempts
 - a transcript's replies and its completion marker commit together, so a producer that fails before
   the commit leaves nothing queued and a retry cannot duplicate the first attempt's rows
-- delivered rows are never pruned, so the queue only grows
+- delivered rows are pruned once they are older than the retention, so the queue does not grow
+  forever (ADR 0016); unsent rows are never pruned, and a pending reply older than the retention
+  loses its latency sample because its source message is gone
 
 ## Alternatives considered
 

@@ -153,6 +153,11 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn schema_contains_the_outbox_sent_index() {
+        assert!(SCHEMA.contains("CREATE INDEX IF NOT EXISTS outbox_sent"));
+    }
+
+    #[tokio::test]
     async fn connect_creates_the_database_file_and_parent_directory() {
         let directory =
             std::env::temp_dir().join(format!("u502-database-test-{}", std::process::id()));

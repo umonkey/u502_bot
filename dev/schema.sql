@@ -36,3 +36,9 @@ CREATE TABLE IF NOT EXISTS outbox (
 );
 
 CREATE INDEX IF NOT EXISTS outbox_pending ON outbox (id) WHERE sent_at IS NULL;
+
+-- Serves the message prune and the attachment prune's join.
+CREATE INDEX IF NOT EXISTS messages_received_at ON messages (received_at);
+
+-- Serves the outbox prune.
+CREATE INDEX IF NOT EXISTS outbox_sent ON outbox (sent_at) WHERE sent_at IS NOT NULL;

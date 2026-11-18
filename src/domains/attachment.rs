@@ -172,6 +172,29 @@ impl AttachmentRepository {
 
         Ok(())
     }
+
+    /// Deletes up to `limit` attachments whose message is missing or arrived before `received_before`.
+    ///
+    /// The `transcribed` flag is not consulted: past the transcriber's one-hour window an unprocessed
+    /// row can never be attempted, so the flag no longer separates live work from dead weight. The left
+    /// join also matches a legacy row written before a message and its attachment committed together;
+    /// such a row has no timestamp to age, and no pending scan can reach it either.
+    pub async fn prune_for_messages_before(&self, received_before: i64, limit: i64) -> Result<u64> {
+        let deleted = sqlx::query(
+            "DELETE FROM attachments WHERE id IN ( \
+             SELECT a.id FROM attachments AS a \
+             LEFT JOIN messages AS m ON m.chat_id = a.chat_id AND m.message_id = a.message_id \
+             WHERE m.id IS NULL OR m.received_at < ? \
+             ORDER BY a.id LIMIT ?)",
+        )
+        .bind(received_before)
+        .bind(limit)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+
+        Ok(deleted)
+    }
 }
 
 /// Inserts one row on the caller's connection, so the caller can insert inside its own transaction.
@@ -251,6 +274,87 @@ mod tests {
             .execute(&repository.pool)
             .await
             .expect("message should store");
+    }
+
+    async fn attachment_ids(repository: &AttachmentRepository) -> Vec<i64> {
+        sqlx::query_scalar("SELECT id FROM attachments ORDER BY id")
+            .fetch_all(&repository.pool)
+            .await
+            .expect("rows should exist")
+    }
+
+    #[tokio::test]
+    async fn prune_deletes_old_and_orphan_attachments() {
+        let repository = in_memory_repository().await;
+        store_message(&repository, 7, RECEIVED_AT).await;
+        store_message(&repository, 8, RECEIVED_AT + 1_000).await;
+        repository
+            .store(&audio_for(7))
+            .await
+            .expect("old audio should store");
+        repository
+            .store(&audio_for(8))
+            .await
+            .expect("recent audio should store");
+        repository
+            .store(&audio_for(99))
+            .await
+            .expect("orphan audio should store");
+        repository
+            .mark_transcribed(2)
+            .await
+            .expect("mark_transcribed should succeed");
+
+        let deleted = repository
+            .prune_for_messages_before(RECEIVED_AT + 500, 10)
+            .await
+            .expect("prune should succeed");
+
+        assert_eq!(deleted, 2);
+        assert_eq!(attachment_ids(&repository).await, vec![2]);
+    }
+
+    #[tokio::test]
+    async fn prune_honours_the_limit() {
+        let repository = in_memory_repository().await;
+        for message_id in 7..10 {
+            store_message(&repository, message_id, RECEIVED_AT).await;
+            repository
+                .store(&audio_for(message_id))
+                .await
+                .expect("audio should store");
+        }
+
+        let deleted = repository
+            .prune_for_messages_before(RECEIVED_AT + 1, 2)
+            .await
+            .expect("prune should succeed");
+
+        assert_eq!(deleted, 2);
+        assert_eq!(attachment_ids(&repository).await, vec![3]);
+    }
+
+    #[tokio::test]
+    async fn prune_is_idempotent() {
+        let repository = in_memory_repository().await;
+        store_message(&repository, 7, RECEIVED_AT).await;
+        repository
+            .store(&audio_for(7))
+            .await
+            .expect("audio should store");
+
+        let first = repository
+            .prune_for_messages_before(RECEIVED_AT + 1, 10)
+            .await
+            .expect("first prune should succeed");
+        let second = repository
+            .prune_for_messages_before(RECEIVED_AT + 1, 10)
+            .await
+            .expect("second prune should succeed");
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 0);
+        assert!(attachment_ids(&repository).await.is_empty());
     }
 
     #[tokio::test]

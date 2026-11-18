@@ -27,6 +27,9 @@ use crate::shared::result::{Error, Result};
 /// Model used when [`VariableName::TranscribeModelName`] is unset or empty.
 pub const DEFAULT_TRANSCRIBE_MODEL: &str = "google/gemini-3.5-transcribe";
 
+/// Days of rows kept when [`VariableName::RetentionDays`] is unset; a configured `0` disables pruning.
+pub const DEFAULT_RETENTION_DAYS: u32 = 30;
+
 /// Everything the bot reads from the environment, resolved and validated once.
 ///
 /// Holds secrets: it deliberately implements no `Debug`, `Display`, or `Clone`.
@@ -35,6 +38,8 @@ pub struct Settings {
     pub openrouter_api_key: String,
     pub transcribe_model: String,
     pub transcribe_chats: Whitelist,
+    /// `Some(days)` keeps that many days of rows, `None` keeps every row.
+    pub retention_days: Option<u32>,
     pub database_path: PathBuf,
     pub sentry_dsn: SentryDsn,
 }
@@ -58,6 +63,10 @@ impl Settings {
             transcribe_chats: lookup(VariableName::TranscribeChats)
                 .await?
                 .map_or_else(|| Ok(Whitelist::default()), |raw| Whitelist::parse(&raw))?,
+            retention_days: match lookup(VariableName::RetentionDays).await? {
+                Some(raw) => retention_days(&raw)?,
+                None => Some(DEFAULT_RETENTION_DAYS),
+            },
             database_path,
             sentry_dsn: classify_dsn(lookup(VariableName::SentryDsn).await),
         })
@@ -84,6 +93,15 @@ async fn require(
     name: VariableName,
 ) -> Result<String> {
     lookup(name).await?.ok_or(Error::MissingVariable(name))
+}
+
+/// Parses `RETENTION_DAYS`: a whole number of days, `0` meaning keep every row.
+fn retention_days(raw: &str) -> Result<Option<u32>> {
+    let days: u32 = raw
+        .parse()
+        .map_err(|_| Error::InvalidRetentionDays(raw.to_owned()))?;
+
+    Ok((days > 0).then_some(days))
 }
 
 /// The chats whose audio and video are transcribed.
@@ -335,6 +353,52 @@ mod tests {
             .expect("a configured model should load");
 
         assert_eq!(settings.transcribe_model, "openai/whisper-1");
+    }
+
+    #[tokio::test]
+    async fn unset_retention_resolves_to_the_default() {
+        let settings = settings(&required_values())
+            .await
+            .expect("required values should load");
+
+        assert_eq!(settings.retention_days, Some(DEFAULT_RETENTION_DAYS));
+    }
+
+    #[tokio::test]
+    async fn zero_retention_disables_pruning() {
+        let mut values = required_values();
+        values.push((VariableName::RetentionDays, "0"));
+
+        let settings = settings(&values)
+            .await
+            .expect("a zero retention should load");
+
+        assert_eq!(settings.retention_days, None);
+    }
+
+    #[tokio::test]
+    async fn configured_retention_is_kept() {
+        let mut values = required_values();
+        values.push((VariableName::RetentionDays, "7"));
+
+        let settings = settings(&values)
+            .await
+            .expect("a configured retention should load");
+
+        assert_eq!(settings.retention_days, Some(7));
+    }
+
+    #[tokio::test]
+    async fn non_numeric_retention_fails() {
+        for raw in ["-1", "1d"] {
+            let mut values = required_values();
+            values.push((VariableName::RetentionDays, raw));
+
+            match settings_error(&values).await {
+                Error::InvalidRetentionDays(value) => assert_eq!(value, raw),
+                other => panic!("expected an invalid retention, got {other}"),
+            }
+        }
     }
 
     #[test]

@@ -3,6 +3,7 @@
 - Status: accepted
 - Amended: 2026-11-18, to record the pool settings and the additive-only schema rule.
 - Amended: 2026-11-18, to allow pooled readers under WAL.
+- Amended: 2026-11-18, to record the retention and pruning service.
 - Date: 2026-11-17
 
 ## Context
@@ -38,8 +39,9 @@ existing table needs a manual upgrade.
   while a read followed by a write can instead fail with `SQLITE_BUSY_SNAPSHOT`, which the busy
   timeout does not retry
 - a backup is a copy of one file, and there is no service to install, watch, or pay for
-- old messages are never removed, so the file grows, and delivered outbox rows and processed
-  attachments are kept too
+- an hourly pruning service deletes delivered outbox rows, then attachments whose message is missing
+  or older than the retention, then messages older than the retention (ADR 0016), so growth is
+  bounded but the file does not shrink until an operator runs `VACUUM`
 - an edited message is not updated, and the first version is what remains stored
 - a stored structure change needs a rebuild and a manual upgrade of existing files
 - the arrangement fits one bot on one host, because a second instance would write the same file

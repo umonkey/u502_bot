@@ -37,6 +37,7 @@ Two repository shortcuts wrap the same commands: `make start` runs the bot in a 
 - `DATABASE_PATH=/opt/data/database.sqlite`
 - `RUST_LOG`, defaulting to `info`
 - `TRANSCRIBE_CHATS` and `TRANSCRIBE_MODEL_NAME`, passed through from the host environment or `.env` and empty when unset, which means "transcribe nothing" and "use the built-in model"
+- `RETENTION_DAYS`, passed through the same way and empty when unset, which keeps the built-in 30 days; `0` keeps every row instead of pruning
 
 What each variable means, how its `_FILE` form resolves, and which ones are required is in [configuration](features/configuration/README.md). The chat list is in [access](features/access/README.md).
 

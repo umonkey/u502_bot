@@ -140,6 +140,25 @@ impl OutboxRepository {
 
         Ok(())
     }
+
+    /// Deletes up to `limit` delivered rows sent before `sent_before`, returning how many were deleted.
+    ///
+    /// `sent_at IS NOT NULL` is what makes this idempotent: a second call over the same rows finds
+    /// nothing, because the rows it would have matched are already gone. Unsent rows are never touched,
+    /// so a queued reply cannot be lost to retention.
+    pub async fn prune_sent_before(&self, sent_before: i64, limit: i64) -> Result<u64> {
+        let deleted = sqlx::query(
+            "DELETE FROM outbox WHERE id IN ( \
+             SELECT id FROM outbox WHERE sent_at IS NOT NULL AND sent_at < ? ORDER BY id LIMIT ?)",
+        )
+        .bind(sent_before)
+        .bind(limit)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+
+        Ok(deleted)
+    }
 }
 
 /// Inserts one row on the caller's connection, so the caller can insert inside its own transaction.
@@ -240,6 +259,86 @@ mod tests {
             .fetch_one(&repository.pool)
             .await
             .expect("count should succeed")
+    }
+
+    const SENT_AT: i64 = 1_700_000_000;
+
+    async fn queued_ids(repository: &OutboxRepository) -> Vec<i64> {
+        sqlx::query_scalar("SELECT id FROM outbox ORDER BY id")
+            .fetch_all(&repository.pool)
+            .await
+            .expect("rows should exist")
+    }
+
+    #[tokio::test]
+    async fn prune_deletes_sent_rows_before_the_cutoff() {
+        let repository = in_memory_repository().await;
+        let old = queue(&repository, &new_outbox_message()).await;
+        let recent = queue(&repository, &new_outbox_message()).await;
+        let unsent = queue(&repository, &new_outbox_message()).await;
+        repository
+            .mark_sent(old, SENT_AT)
+            .await
+            .expect("mark_sent should succeed");
+        repository
+            .mark_sent(recent, SENT_AT + 100)
+            .await
+            .expect("mark_sent should succeed");
+
+        let deleted = repository
+            .prune_sent_before(SENT_AT + 50, 10)
+            .await
+            .expect("prune should succeed");
+
+        assert_eq!(deleted, 1);
+        assert_eq!(queued_ids(&repository).await, vec![recent, unsent]);
+    }
+
+    #[tokio::test]
+    async fn prune_honours_the_limit() {
+        let repository = in_memory_repository().await;
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            ids.push(queue(&repository, &new_outbox_message()).await);
+        }
+        for id in &ids {
+            repository
+                .mark_sent(*id, SENT_AT)
+                .await
+                .expect("mark_sent should succeed");
+        }
+
+        let deleted = repository
+            .prune_sent_before(SENT_AT + 1, 2)
+            .await
+            .expect("prune should succeed");
+
+        assert_eq!(deleted, 2);
+        assert_eq!(outbox_rows(&repository).await, 1);
+        assert_eq!(queued_ids(&repository).await, vec![ids[2]]);
+    }
+
+    #[tokio::test]
+    async fn prune_is_idempotent() {
+        let repository = in_memory_repository().await;
+        let id = queue(&repository, &new_outbox_message()).await;
+        repository
+            .mark_sent(id, SENT_AT)
+            .await
+            .expect("mark_sent should succeed");
+
+        let first = repository
+            .prune_sent_before(SENT_AT + 1, 10)
+            .await
+            .expect("first prune should succeed");
+        let second = repository
+            .prune_sent_before(SENT_AT + 1, 10)
+            .await
+            .expect("second prune should succeed");
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 0);
+        assert_eq!(outbox_rows(&repository).await, 0);
     }
 
     #[tokio::test]

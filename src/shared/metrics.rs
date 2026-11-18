@@ -24,12 +24,18 @@ pub enum MetricName {
     TelegramAttachmentsStored,
     /// Counting every attachment the transcriber finished with.
     TelegramAttachmentsTranscribed,
+    /// Counting every message pruning deleted.
+    TelegramMessagesPruned,
+    /// Counting every attachment pruning deleted.
+    TelegramAttachmentsPruned,
 
     // Outbox
     /// Counting every message queued in the outbox.
     OutboxMessagesAdded,
     /// Counting every outbox message Telegram accepted.
     OutboxMessagesSent,
+    /// Counting every delivered outbox row pruning deleted.
+    OutboxMessagesPruned,
 
     // Transcription
     /// Measuring the delay between a source message and its reply, in seconds.
@@ -64,8 +70,11 @@ impl MetricName {
             Self::TelegramAttachmentsVideo => "telegram.attachments.video",
             Self::TelegramAttachmentsStored => "telegram.attachments.stored",
             Self::TelegramAttachmentsTranscribed => "telegram.attachments.transcribed",
+            Self::TelegramMessagesPruned => "telegram.messages.pruned",
+            Self::TelegramAttachmentsPruned => "telegram.attachments.pruned",
             Self::OutboxMessagesAdded => "outbox.messages.added",
             Self::OutboxMessagesSent => "outbox.messages.sent",
+            Self::OutboxMessagesPruned => "outbox.messages.pruned",
             Self::TranscriptionReplyLatency => "transcription.reply.latency",
             Self::OpenRouterCalls => "openrouter.calls",
             Self::OpenRouterDuration => "openrouter.duration",
@@ -117,8 +126,17 @@ mod tests {
                 MetricName::TelegramAttachmentsTranscribed,
                 "telegram.attachments.transcribed",
             ),
+            (
+                MetricName::TelegramMessagesPruned,
+                "telegram.messages.pruned",
+            ),
+            (
+                MetricName::TelegramAttachmentsPruned,
+                "telegram.attachments.pruned",
+            ),
             (MetricName::OutboxMessagesAdded, "outbox.messages.added"),
             (MetricName::OutboxMessagesSent, "outbox.messages.sent"),
+            (MetricName::OutboxMessagesPruned, "outbox.messages.pruned"),
             (
                 MetricName::TranscriptionReplyLatency,
                 "transcription.reply.latency",

@@ -78,6 +78,11 @@ fn count(metric: MetricName) {
     sentry::metrics::counter(metric.as_str(), 1).capture();
 }
 
+/// Captures a counter increment of more than one.
+fn count_rows(metric: MetricName, rows: u64) {
+    sentry::metrics::counter(metric.as_str(), rows as f64).capture();
+}
+
 /// Records one received Telegram message.
 pub fn message_received() {
     count(MetricName::TelegramMessagesReceived);
@@ -127,6 +132,21 @@ pub fn outbox_added() {
 /// Records one outbox message Telegram accepted.
 pub fn outbox_sent() {
     count(MetricName::OutboxMessagesSent);
+}
+
+/// Records how many delivered outbox rows one pruning statement deleted.
+pub fn outbox_pruned(rows: u64) {
+    count_rows(MetricName::OutboxMessagesPruned, rows);
+}
+
+/// Records how many messages one pruning statement deleted.
+pub fn messages_pruned(rows: u64) {
+    count_rows(MetricName::TelegramMessagesPruned, rows);
+}
+
+/// Records how many attachments one pruning statement deleted.
+pub fn attachments_pruned(rows: u64) {
+    count_rows(MetricName::TelegramAttachmentsPruned, rows);
 }
 
 /// Records the delay between the source message Telegram saw and the reply Telegram accepted.
@@ -260,6 +280,13 @@ mod tests {
         outbox_added();
         outbox_sent();
         transcription_reply_latency(1.5);
+    }
+
+    #[test]
+    fn retention_metrics_are_safe_without_client() {
+        outbox_pruned(7);
+        messages_pruned(11);
+        attachments_pruned(13);
     }
 
     #[test]

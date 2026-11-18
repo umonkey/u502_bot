@@ -1,10 +1,10 @@
 //! The `start` command: compose the clients, the repositories, and the long-running services.
 //!
 //! Everything fallible is resolved before the first task is spawned, so a configuration failure
-//! exits with nothing started: no ingestor, no transcriber, no outbox, and no database write.
-//! Configuration is loaded before the `tracing` subscriber exists, so this module resolves the DSN
-//! once more, best effort, before reporting the failure in the one place that maps any failure to an
-//! exit code.
+//! exits with nothing started: no ingestor, no transcriber, no outbox, no pruner, and no database
+//! write. Configuration is loaded before the `tracing` subscriber exists, so this module resolves the
+//! DSN once more, best effort, before reporting the failure in the one place that maps any failure to
+//! an exit code.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -19,6 +19,7 @@ use crate::infra::telegram_bot::Telegram;
 use crate::infra::{database, sentry, signal};
 use crate::services::ingestor::Ingestor;
 use crate::services::outbox::Outbox;
+use crate::services::pruner::Pruner;
 use crate::services::shutdown::{self, ShutdownTrigger};
 use crate::services::transcriber::Transcriber;
 use crate::services::wake;
@@ -71,6 +72,14 @@ async fn start(settings: Settings) -> Result<()> {
         );
     }
 
+    match settings.retention_days {
+        Some(days) => tracing::info!(
+            retention_days = days,
+            "Pruning messages, attachments, and delivered outbox rows older than {days} days; set RETENTION_DAYS=0 to keep every row"
+        ),
+        None => tracing::info!("Retention is disabled: RETENTION_DAYS=0 keeps every row"),
+    }
+
     let model = &settings.transcribe_model;
     tracing::info!(model = %model, "Using model {model} to transcribe; override with TRANSCRIBE_MODEL_NAME");
 
@@ -86,6 +95,7 @@ async fn start(settings: Settings) -> Result<()> {
     let telegram = Telegram::connect(settings.telegram_api_token).await?;
 
     let pool = database.pool().clone();
+    let retention_days = settings.retention_days;
 
     // One edge per pair of services: the ingestor wakes the transcriber when it stores an
     // attachment, and the transcriber wakes the outbox when it queues a reply. Each edge has a
@@ -108,12 +118,19 @@ async fn start(settings: Settings) -> Result<()> {
         pending_attachments,
         replies_queued,
     );
+    let pruner = Pruner::new(
+        OutboxRepository::new(pool.clone()),
+        AttachmentRepository::new(pool.clone()),
+        MessageRepository::new(pool.clone()),
+        retention_days,
+    );
     let outbox = Outbox::new(telegram, OutboxRepository::new(pool), pending_replies);
 
-    let (ingestor, transcriber, outbox) = tokio::join!(
+    let (ingestor, transcriber, outbox, pruner) = tokio::join!(
         tokio::spawn(ingestor.run(shutdown.clone())),
         tokio::spawn(transcriber.run(shutdown.clone())),
         tokio::spawn(outbox.run(shutdown.clone())),
+        tokio::spawn(pruner.run(shutdown.clone())),
     );
 
     let shutting_down = shutdown.is_requested();
@@ -121,6 +138,7 @@ async fn start(settings: Settings) -> Result<()> {
     log_service_exit("ingestor", ingestor, shutting_down);
     log_service_exit("transcriber", transcriber, shutting_down);
     log_service_exit("outbox", outbox, shutting_down);
+    log_service_exit("pruner", pruner, shutting_down);
 
     database.close().await;
     tracing::info!("Stopped the bot.");
@@ -148,7 +166,7 @@ async fn init_database(path: &Path) -> Result<database::Database> {
     Ok(database)
 }
 
-/// Logs a service task that returned or panicked; the other two keep running unless shutdown was
+/// Logs a service task that returned or panicked; the other three keep running unless shutdown was
 /// requested.
 fn log_service_exit(
     service: &'static str,

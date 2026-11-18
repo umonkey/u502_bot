@@ -92,6 +92,23 @@ impl MessageRepository {
             attachment: attachment_outcome,
         })
     }
+
+    /// Deletes up to `limit` messages received before `received_before`.
+    ///
+    /// Run after the attachment prune, so each attachment is aged while its message still exists.
+    pub async fn prune_received_before(&self, received_before: i64, limit: i64) -> Result<u64> {
+        let deleted = sqlx::query(
+            "DELETE FROM messages WHERE id IN ( \
+             SELECT id FROM messages WHERE received_at < ? ORDER BY id LIMIT ?)",
+        )
+        .bind(received_before)
+        .bind(limit)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+
+        Ok(deleted)
+    }
 }
 
 /// Inserts one row on the caller's connection, so the caller can insert inside its own transaction.
@@ -171,6 +188,105 @@ mod tests {
             .fetch_one(&repository.pool)
             .await
             .expect("count should succeed")
+    }
+
+    async fn message_ids(repository: &MessageRepository) -> Vec<i64> {
+        sqlx::query_scalar("SELECT id FROM messages ORDER BY id")
+            .fetch_all(&repository.pool)
+            .await
+            .expect("rows should exist")
+    }
+
+    #[tokio::test]
+    async fn prune_deletes_old_messages() {
+        let repository = in_memory_repository().await;
+        repository
+            .store(&new_message(), None)
+            .await
+            .expect("old message should store");
+        repository
+            .store(
+                &NewMessage {
+                    message_id: 8,
+                    received_at: 1_700_000_100,
+                    ..new_message()
+                },
+                None,
+            )
+            .await
+            .expect("recent message should store");
+
+        let deleted = repository
+            .prune_received_before(1_700_000_050, 10)
+            .await
+            .expect("prune should succeed");
+
+        assert_eq!(deleted, 1);
+        assert_eq!(message_ids(&repository).await, vec![2]);
+    }
+
+    #[tokio::test]
+    async fn prune_keeps_messages_at_the_cutoff() {
+        let repository = in_memory_repository().await;
+        repository
+            .store(&new_message(), None)
+            .await
+            .expect("message should store");
+
+        let deleted = repository
+            .prune_received_before(new_message().received_at, 10)
+            .await
+            .expect("prune should succeed");
+
+        assert_eq!(deleted, 0);
+        assert_eq!(count(&repository, "messages").await, 1);
+    }
+
+    #[tokio::test]
+    async fn prune_honours_the_limit() {
+        let repository = in_memory_repository().await;
+        for message_id in 7..10 {
+            repository
+                .store(
+                    &NewMessage {
+                        message_id,
+                        ..new_message()
+                    },
+                    None,
+                )
+                .await
+                .expect("message should store");
+        }
+
+        let deleted = repository
+            .prune_received_before(1_700_000_001, 2)
+            .await
+            .expect("prune should succeed");
+
+        assert_eq!(deleted, 2);
+        assert_eq!(message_ids(&repository).await, vec![3]);
+    }
+
+    #[tokio::test]
+    async fn prune_is_idempotent() {
+        let repository = in_memory_repository().await;
+        repository
+            .store(&new_message(), None)
+            .await
+            .expect("message should store");
+
+        let first = repository
+            .prune_received_before(1_700_000_001, 10)
+            .await
+            .expect("first prune should succeed");
+        let second = repository
+            .prune_received_before(1_700_000_001, 10)
+            .await
+            .expect("second prune should succeed");
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 0);
+        assert_eq!(count(&repository, "messages").await, 0);
     }
 
     #[tokio::test]

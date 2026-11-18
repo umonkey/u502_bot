@@ -62,6 +62,8 @@ pub enum Error {
     EmptyConfiguration(VariableName),
     /// One `TRANSCRIBE_CHATS` entry is not a numeric chat id.
     InvalidChatId(String),
+    /// `RETENTION_DAYS` is not a non-negative whole number of days.
+    InvalidRetentionDays(String),
 
     // External clients
     /// A call failed; `operation` names what was being done, and `source` keeps the cause.
@@ -124,6 +126,10 @@ impl fmt::Display for Error {
                 formatter,
                 "{} entry {token:?} is not a numeric chat id",
                 VariableName::TranscribeChats
+            ),
+            Self::InvalidRetentionDays(value) => write!(
+                formatter,
+                "RETENTION_DAYS entry {value:?} is not a non-negative number of days"
             ),
             Self::External { operation, source } => write!(formatter, "{operation}: {source}"),
             Self::CreateDatabaseDirectory { path, source } => {
@@ -195,6 +201,7 @@ impl std::error::Error for Error {
             | Self::VariableNotUnicode(_)
             | Self::EmptyConfiguration(_)
             | Self::InvalidChatId(_)
+            | Self::InvalidRetentionDays(_)
             | Self::MessageIdOutOfRange(_)
             | Self::HttpStatus { .. }
             | Self::AudioTooLarge { .. }
@@ -228,6 +235,16 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "TRANSCRIBE_CHATS entry \"not-a-number\" is not a numeric chat id"
+        );
+    }
+
+    #[test]
+    fn invalid_retention_days_names_the_variable() {
+        let error = Error::InvalidRetentionDays("-1".to_owned());
+
+        assert_eq!(
+            error.to_string(),
+            "RETENTION_DAYS entry \"-1\" is not a non-negative number of days"
         );
     }
 
