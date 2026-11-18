@@ -24,6 +24,10 @@ The `transcribed` flag means processed: transcribed, silent, or deliberately ski
 
 `sent_at` stays NULL until Telegram accepts a row, so a restart resends whatever was queued but not delivered. Delivery is at-least-once; see [communication](../communication/README.md).
 
+## Concurrency
+
+The file is opened with WAL journaling, so a read sees the last committed snapshot while another connection is writing. The pool holds up to four connections, so the transcriber's pending scan and the outbox's pending scan do not wait for the ingestor's commit. SQLite still admits one writer at a time: a second writer waits on the five-second busy timeout instead of failing, so a transaction writes before it reads rather than holding a read snapshot open across its first write. In-memory test databases keep one connection, because each `:memory:` connection is a separate database.
+
 ## Schema
 
 The schema is embedded from `dev/schema.sql` at build time with `include_str!` and applied on every startup, so there is nothing to mount or configure and no migration step to run. A schema change is an idempotent statement in that file, and the file itself is not shipped in the image.

@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Amended: 2026-11-18, to record the pool settings and the additive-only schema rule.
+- Amended: 2026-11-18, to allow pooled readers under WAL.
 - Date: 2026-11-17
 
 ## Context
@@ -21,15 +22,21 @@ starts the bot stores them, so the platform client knows nothing about storage. 
 asynchronously, so a slow disk delays the next message instead of stalling the connection. Apply the
 stored structure at startup, so a fresh volume needs no preparation and an existing one keeps
 working. Open the file with WAL journaling, a five-second busy timeout, and foreign keys, over a pool
-of one connection; embed the schema in the binary at build time. Recognise a message delivered again
-and leave the stored copy alone. There is no migration mechanism yet: startup only creates missing
-objects, so an additive statement ships with the application, while altering an existing table needs
-a manual upgrade.
+of up to four connections: WAL admits one writer and many readers, so a read sees the last committed
+snapshot while another connection writes; embed the schema in the binary at build time. Recognise a
+message delivered again and leave the stored copy alone. There is no migration mechanism yet: startup
+only creates missing objects, so an additive statement ships with the application, while altering an
+existing table needs a manual upgrade.
 
 ## Consequences
 
 - receiving and later processing are decoupled, so slow or failing work never holds up messages
 - messages survive restarts, and a redelivery is harmless
+- a read on one connection no longer waits for a write on another, and it sees the last committed
+  snapshot; writers still queue behind SQLite's single write lock, waiting up to the busy timeout
+- a transaction must write first, because a deferred `BEGIN` takes the write lock on its first write,
+  while a read followed by a write can instead fail with `SQLITE_BUSY_SNAPSHOT`, which the busy
+  timeout does not retry
 - a backup is a copy of one file, and there is no service to install, watch, or pay for
 - old messages are never removed, so the file grows, and delivered outbox rows and processed
   attachments are kept too
