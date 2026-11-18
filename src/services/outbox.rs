@@ -10,6 +10,7 @@ use std::time::Duration;
 use crate::domains::outbox::{OutboxRepository, PendingMessage};
 use crate::infra::sentry;
 use crate::infra::telegram_bot::Telegram;
+use crate::services::shutdown::Shutdown;
 use crate::services::unix_now;
 
 /// Rows read per scan.
@@ -36,21 +37,26 @@ impl Outbox {
         }
     }
 
-    /// Delivers queued messages forever, pausing only when there is nothing to do.
-    pub async fn run(self) {
-        loop {
-            if !self.tick().await {
-                tokio::time::sleep(IDLE).await;
+    /// Delivers queued messages until shutdown is requested, pausing only when there is nothing to
+    /// do.
+    pub async fn run(self, mut shutdown: Shutdown) {
+        while !shutdown.is_requested() {
+            if !self.tick(&mut shutdown).await && !shutdown.sleep(IDLE).await {
+                break;
             }
         }
+
+        tracing::info!("Stopped the outbox");
     }
 
     /// Delivers one batch and returns whether any row was delivered.
     ///
-    /// A failed read sleeps here rather than returning: the pool is shared with the other services,
-    /// and a failed read must not spin. A rejected send is logged and left unsent, so one bad message
-    /// does not block the queue; the next scan retries it.
-    async fn tick(&self) -> bool {
+    /// The pause lives in the caller, where it is interruptible: a failed read returns `false`, so
+    /// the pool shared with the other services is retried once per [`IDLE`] instead of spinning. A
+    /// rejected send is logged and left unsent, so one bad message does not block the queue; the next
+    /// scan retries it. A shutdown interrupts a send by dropping it, which may duplicate that one
+    /// reply per the at-least-once delivery the outbox already promises.
+    async fn tick(&self, shutdown: &mut Shutdown) -> bool {
         let pending = match self.repository.pending(BATCH).await {
             Ok(pending) => pending,
             Err(error) => {
@@ -58,7 +64,6 @@ impl Outbox {
                     error = &error as &dyn std::error::Error,
                     "Failed to read the outbox"
                 );
-                tokio::time::sleep(IDLE).await;
 
                 return false;
             }
@@ -67,11 +72,16 @@ impl Outbox {
         let mut delivered = false;
 
         for message in pending {
-            match self
-                .telegram
-                .send(message.chat_id, &message.message, message.thread_id)
-                .await
-            {
+            if shutdown.is_requested() {
+                break;
+            }
+
+            match tokio::select! {
+                result = self
+                    .telegram
+                    .send(message.chat_id, &message.message, message.thread_id) => result,
+                () = shutdown.wait() => break,
+            } {
                 Ok(()) => delivered |= self.mark_sent(&message).await,
                 Err(error) => tracing::error!(
                     outbox_id = message.id,
@@ -81,7 +91,9 @@ impl Outbox {
                 ),
             }
 
-            tokio::time::sleep(SEND_DELAY).await;
+            if !shutdown.sleep(SEND_DELAY).await {
+                break;
+            }
         }
 
         delivered

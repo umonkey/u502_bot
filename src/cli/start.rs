@@ -10,9 +10,10 @@ use crate::domains::message::MessageRepository;
 use crate::domains::outbox::OutboxRepository;
 use crate::infra::openrouter::{self, OpenRouter};
 use crate::infra::telegram_bot::Telegram;
-use crate::infra::{config::get_secret, database, sentry};
+use crate::infra::{config::get_secret, database, sentry, signal};
 use crate::services::ingestor::Ingestor;
 use crate::services::outbox::Outbox;
+use crate::services::shutdown::Shutdown;
 use crate::services::transcriber::{Transcriber, Whitelist};
 
 const TELEGRAM_API_TOKEN: &str = "TELEGRAM_API_TOKEN";
@@ -27,8 +28,13 @@ pub async fn run() -> ExitCode {
     }
 }
 
-/// Builds every client and repository, then runs the services until one of them returns.
+/// Builds every client and repository, then runs the services until a signal or a service ends them.
 async fn start() -> Result<(), ExitCode> {
+    // Registered first, so a signal that arrives during the slow startup work is remembered by the
+    // sticky flag instead of killing the process.
+    let shutdown = Shutdown::new();
+    let _signals = tokio::spawn(watch_for_shutdown(shutdown.clone()));
+
     let token = resolve(
         get_secret(TELEGRAM_API_TOKEN),
         "Failed to load TELEGRAM_API_TOKEN",
@@ -74,16 +80,32 @@ async fn start() -> Result<(), ExitCode> {
     let outbox = Outbox::new(telegram, OutboxRepository::new(pool));
 
     let (ingestor, transcriber, outbox) = tokio::join!(
-        tokio::spawn(ingestor.run()),
-        tokio::spawn(transcriber.run()),
-        tokio::spawn(outbox.run()),
+        tokio::spawn(ingestor.run(shutdown.clone())),
+        tokio::spawn(transcriber.run(shutdown.clone())),
+        tokio::spawn(outbox.run(shutdown.clone())),
     );
 
-    log_service_exit("ingestor", ingestor);
-    log_service_exit("transcriber", transcriber);
-    log_service_exit("outbox", outbox);
+    let shutting_down = shutdown.is_requested();
+
+    log_service_exit("ingestor", ingestor, shutting_down);
+    log_service_exit("transcriber", transcriber, shutting_down);
+    log_service_exit("outbox", outbox, shutting_down);
+
+    database.close().await;
+    tracing::info!("Stopped the bot.");
 
     Ok(())
+}
+
+/// Requests shutdown when the process receives a signal that asks it to stop.
+async fn watch_for_shutdown(shutdown: Shutdown) {
+    let signal = signal::wait().await;
+
+    tracing::info!(
+        signal = %signal,
+        "Received a shutdown signal; stopping the services"
+    );
+    shutdown.request();
 }
 
 /// Opens the database named by `DATABASE_PATH` and applies the embedded schema.
@@ -109,9 +131,15 @@ where
     })
 }
 
-/// Logs a service task that returned or panicked; the other two keep running.
-fn log_service_exit(service: &'static str, result: Result<(), tokio::task::JoinError>) {
+/// Logs a service task that returned or panicked; the other two keep running unless shutdown was
+/// requested.
+fn log_service_exit(
+    service: &'static str,
+    result: Result<(), tokio::task::JoinError>,
+    shutting_down: bool,
+) {
     match result {
+        Ok(()) if shutting_down => tracing::debug!(service, "A service stopped"),
         Ok(()) => tracing::error!(
             service,
             "A service returned; the remaining services keep running"

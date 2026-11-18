@@ -13,6 +13,7 @@ use crate::domains::attachment::{
 use crate::domains::message::{MessageRepository, NewMessage, StoreOutcome};
 use crate::infra::sentry;
 use crate::infra::telegram_bot::Messages;
+use crate::services::shutdown::Shutdown;
 
 /// Reads incoming Telegram messages and stores each one with its attachment.
 pub struct Ingestor {
@@ -35,15 +36,35 @@ impl Ingestor {
         }
     }
 
-    /// Stores every message the dispatcher delivers; returns only when polling stops.
-    pub async fn run(mut self) {
+    /// Stores every message the dispatcher delivers until shutdown is requested.
+    ///
+    /// A signal is followed by a drain rather than a return: Telegram acknowledges an update when
+    /// the dispatcher fetches it, so a message already buffered would be lost if the buffer were
+    /// dropped. The receiver is closed before the drain, so it ends when the buffer is empty and a
+    /// worker blocked on a full channel is released; only then does the dispatcher stop, which is
+    /// what keeps that wait from deadlocking.
+    pub async fn run(mut self, mut shutdown: Shutdown) {
         loop {
-            let Some(message) = self.messages.next().await else {
-                return;
+            let message = tokio::select! {
+                () = shutdown.wait() => break,
+                message = self.messages.next() => message,
+            };
+
+            let Some(message) = message else {
+                break;
             };
 
             self.ingest(&message).await;
         }
+
+        self.messages.close();
+
+        while let Some(message) = self.messages.next().await {
+            self.ingest(&message).await;
+        }
+
+        self.messages.stop().await;
+        tracing::info!("Stopped the ingestor");
     }
 
     /// Stores one delivered message and, when it carries media, its attachment.

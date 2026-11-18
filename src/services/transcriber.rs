@@ -21,6 +21,7 @@ use crate::domains::outbox::{NewOutboxMessage, OutboxError, OutboxRepository};
 use crate::infra::openrouter::OpenRouter;
 use crate::infra::sentry;
 use crate::infra::telegram_bot::Telegram;
+use crate::services::shutdown::Shutdown;
 use crate::services::unix_now;
 
 /// Instruction sent with every file; it asks for a verbatim transcript and nothing else.
@@ -162,21 +163,24 @@ impl Transcriber {
         }
     }
 
-    /// Transcribes pending audio forever, pausing only when there is nothing to do.
-    pub async fn run(self) {
-        loop {
-            if !self.tick().await {
-                tokio::time::sleep(IDLE).await;
+    /// Transcribes pending audio until shutdown is requested, pausing only when there is nothing to
+    /// do.
+    pub async fn run(self, mut shutdown: Shutdown) {
+        while !shutdown.is_requested() {
+            if !self.tick(&mut shutdown).await && !shutdown.sleep(IDLE).await {
+                break;
             }
         }
+
+        tracing::info!("Stopped the transcriber");
     }
 
     /// Processes one batch and returns whether any attachment was finished.
     ///
-    /// A failed scan sleeps here rather than returning: the pool is shared with the ingestor, and a
-    /// failed read must not spin. A batch in which every row failed returns `false`, so a file that
-    /// keeps failing is retried once per [`IDLE`] instead of as fast as the failure returns.
-    async fn tick(&self) -> bool {
+    /// The pause lives in the caller, where it is interruptible: a failed scan and a batch in which
+    /// every row failed both return `false`, so a file that keeps failing or a pool that rejects a
+    /// read is retried once per [`IDLE`] instead of as fast as the failure returns.
+    async fn tick(&self, shutdown: &mut Shutdown) -> bool {
         let now = unix_now();
         let pending = match self
             .attachments
@@ -189,7 +193,6 @@ impl Transcriber {
                     error = &error as &dyn std::error::Error,
                     "Failed to scan for pending audio"
                 );
-                tokio::time::sleep(IDLE).await;
 
                 return false;
             }
@@ -198,7 +201,11 @@ impl Transcriber {
         let mut processed = false;
 
         for attachment in pending {
-            processed |= self.process(attachment, now).await;
+            if shutdown.is_requested() {
+                break;
+            }
+
+            processed |= self.process(attachment, now, shutdown).await;
         }
 
         processed
@@ -208,7 +215,9 @@ impl Transcriber {
     ///
     /// No database transaction spans the download or the LLM call: each statement returns the pooled
     /// connection immediately, so holding one would stall the ingestor for the length of the call.
-    async fn process(&self, attachment: PendingAudio, now: i64) -> bool {
+    /// A shutdown interrupts either call by dropping it; the attachment stays pending and is retried
+    /// on the next start, while the writes that follow are never cancelled.
+    async fn process(&self, attachment: PendingAudio, now: i64, shutdown: &mut Shutdown) -> bool {
         if !self.chats.contains(attachment.chat_id) {
             tracing::warn!(
                 chat_id = attachment.chat_id,
@@ -229,17 +238,21 @@ impl Transcriber {
         };
         let path = directory.path().join("audio");
 
-        if let Err(error) = self.telegram.download(&attachment.file_id, &path).await {
+        let downloaded = tokio::select! {
+            result = self.telegram.download(&attachment.file_id, &path) => result,
+            () = shutdown.wait() => return false,
+        };
+        if let Err(error) = downloaded {
             log_failure(&attachment, &error);
 
             return false;
         }
 
-        let transcript = match self
-            .openrouter
-            .transcribe_audio(&path, TRANSCRIPTION_PROMPT)
-            .await
-        {
+        let transcribed = tokio::select! {
+            result = self.openrouter.transcribe_audio(&path, TRANSCRIPTION_PROMPT) => result,
+            () = shutdown.wait() => return false,
+        };
+        let transcript = match transcribed {
             Ok(transcript) => transcript,
             Err(error) => {
                 log_failure(&attachment, &error);

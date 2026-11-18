@@ -46,9 +46,11 @@ Running `make` without a target executes `check`.
 - `src/infra/database.rs`: `Database`, `DatabaseError`, `database_path`, and `SCHEMA`; the async SQLite client, which opens a pooled connection and applies the embedded schema without knowing any table.
 - `src/infra/openrouter.rs`: `OpenRouter`, `model_from_env`, and `DEFAULT_TRANSCRIBE_MODEL`; the audio transcription client, which records its own call telemetry.
 - `src/infra/sentry.rs`: `SENTRY_DSN`, `init` (the `tracing` subscriber, the optional Sentry client, an error layer, and a crate-scoped structured-log layer), and the metric functions for messages, attachments, the outbox, and OpenRouter.
+- `src/infra/signal.rs`: `Signal` and `wait`; the listener for `SIGINT` and, on Unix, `SIGTERM`.
 - `src/infra/telegram_bot.rs`: `Telegram` and `Messages`, the Telegram client; it receives, downloads, and sends, and knows nothing about storage.
-- `src/services.rs`: declares the long-running services and holds their shared clock.
-- `src/services/ingestor.rs`: the message loop; it stores every delivered message and its attachment metadata.
+- `src/services.rs`: declares the long-running services, the shutdown flag they share, and their shared clock.
+- `src/services/shutdown.rs`: `Shutdown`, the sticky cooperative flag that stops every service on one request.
+- `src/services/ingestor.rs`: the message loop; it stores every delivered message and its attachment metadata, drains what the dispatcher already queued, then stops polling.
 - `src/services/transcriber.rs`: the transcription loop and the `TRANSCRIBE_CHATS` whitelist.
 - `src/services/outbox.rs`: the delivery loop; it sends queued replies and marks them sent.
 - `dev/schema.sql`: initial SQLite schema, embedded at build time and applied on every startup.
@@ -94,6 +96,10 @@ docker compose pull            # fetch the published image instead
 docker compose up -d           # start detached
 ```
 
+## Shutdown
+
+`SIGINT` (Ctrl-C) and `SIGTERM` (Compose, Docker, supervisord) both request one cooperative shutdown: the signal listener sets a sticky flag, and each service checks it at a work boundary. The Telegram dispatcher closes its channel, the ingestor stores what the dispatcher had already queued and then stops polling, and the transcriber and the outbox abandon idle pauses and in-flight downloads, model calls, and sends; a download or transcription that is abandoned is retried on the next start, and an interrupted send may duplicate one reply. Database writes already started are never cancelled. After the services end, `start` closes the pool and then returns, so the Sentry guard flushes; a graceful stop exits with success. `stop_grace_period: 20s` in `compose.yaml` and `stopwaitsecs=15` in `docker/supervisord.conf` bound the wait, and supervisord forwards its own `SIGTERM` to the bot, which never sees the Compose signal directly.
+
 ## Architecture decisions
 
 Architecture decisions live in `docs/adr/`, one Markdown file per decision, named `NNNN-slug.md`.
@@ -107,6 +113,7 @@ Architecture decisions live in `docs/adr/`, one Markdown file per decision, name
 - ADR 0007 records the decision to send application logs, including message content, to Sentry.
 - ADR 0008 records the decision to queue outgoing replies in an outbox table.
 - ADR 0009 records the decision to transcribe audio in a separate service.
+- ADR 0010 records the decision to stop the bot gracefully on a signal.
 
 Run `make format-docs` after editing anything under `docs/`.
 

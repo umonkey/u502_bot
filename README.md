@@ -41,3 +41,5 @@ TRANSCRIBE_CHATS=-1001234567890 docker compose up
 ```
 
 `TRANSCRIBE_MODEL_NAME` is passed through when it is set and left empty otherwise, which means the built-in default.
+
+The bot stops cleanly on Ctrl-C and on the signal Compose sends when it stops or restarts the container: it stops polling, stores the messages it had already received, closes the database, and flushes monitoring before exiting.
