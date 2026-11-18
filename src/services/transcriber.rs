@@ -5,9 +5,9 @@
 //! old. An audio attachment is downloaded as-is and sent to OpenRouter's Speech-to-Text API; a video
 //! attachment is downloaded, its audio track is extracted with ffmpeg, and the resulting Ogg joins
 //! the audio flow. Either way the transcript is queued in the outbox and the attachment is marked
-//! processed. The bot also reacts to the message with 👀 when it picks the attachment up, so the
-//! chat sees work in progress; a reaction that fails only logs a warning, because it must never
-//! cost a transcript.
+//! processed. Those two writes are one transaction committed after the model call. The bot also
+//! reacts to the message with 👀 when it picks the attachment up, so the chat sees work in
+//! progress; a reaction that fails only logs a warning, because it must never cost a transcript.
 //!
 //! The one-hour window bounds both cost and retries: a file that keeps failing is retried on every
 //! scan until its message ages out, and then left alone. [`VariableName::TranscribeChats`] limits
@@ -19,7 +19,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use crate::domains::attachment::{AttachmentKind, AttachmentRepository, PendingAttachment};
-use crate::domains::outbox::{NewOutboxMessage, OutboxRepository};
+use crate::domains::outbox::{EnqueueOutcome, NewOutboxMessage, OutboxRepository};
 use crate::infra::config::get_optional;
 use crate::infra::ffmpeg::Ffmpeg;
 use crate::infra::openrouter::{AudioFormat, OpenRouter};
@@ -419,7 +419,7 @@ impl Transcriber {
         self.finish(attachment, &transcript, now).await
     }
 
-    /// Queues a transcript and marks the attachment processed; returns whether both happened.
+    /// Queues a transcript and marks the attachment processed in one transaction.
     async fn finish(&self, attachment: &PendingAttachment, transcript: &str, now: i64) -> bool {
         let transcript = transcript.trim();
 
@@ -435,40 +435,37 @@ impl Transcriber {
             return self.mark_processed(attachment).await;
         }
 
-        if let Err(error) = self.enqueue(attachment, transcript, now).await {
-            log_failure(attachment, &error);
+        let messages = replies(attachment, transcript, now);
 
-            return false;
+        match self
+            .outbox
+            .enqueue_transcript(attachment.id, &messages)
+            .await
+        {
+            Ok(EnqueueOutcome::Enqueued) => {
+                for _ in &messages {
+                    sentry::outbox_added();
+                }
+                sentry::attachment_transcribed();
+                // The outbox is idle-waiting on this edge, so one pulse covers the whole commit.
+                self.pending_replies.notify();
+
+                true
+            }
+            Ok(EnqueueOutcome::AlreadyProcessed) => {
+                tracing::info!(
+                    attachment_id = attachment.id,
+                    "Attachment was already processed; not queueing its transcript again"
+                );
+
+                true
+            }
+            Err(error) => {
+                log_failure(attachment, &error);
+
+                false
+            }
         }
-
-        self.mark_processed(attachment).await
-    }
-
-    /// Queues the transcript in chunks Telegram will accept; returns whether every row was written.
-    ///
-    /// Only the first chunk answers the source message, so the reply thread stays on it.
-    async fn enqueue(
-        &self,
-        attachment: &PendingAttachment,
-        transcript: &str,
-        now: i64,
-    ) -> Result<()> {
-        for (index, chunk) in chunks(transcript, CHUNK_LIMIT).into_iter().enumerate() {
-            let message = NewOutboxMessage {
-                chat_id: attachment.chat_id,
-                thread_id: (index == 0).then_some(attachment.message_id),
-                added_at: now,
-                message: reply_html(chunk, index == 0),
-            };
-
-            self.outbox.enqueue(&message).await?;
-            sentry::outbox_added();
-            // The outbox is idle-waiting on this edge; one pulse per written row is enough, because
-            // a pulse already pending is not lost and the next scan reads every row anyway.
-            self.pending_replies.notify();
-        }
-
-        Ok(())
     }
 
     /// Marks one attachment processed and counts it, on every path that finishes with it.
@@ -528,6 +525,20 @@ fn reply_html(chunk: &str, first: bool) -> String {
     } else {
         format!("<blockquote>{}</blockquote>", escape_html(chunk))
     }
+}
+
+/// Renders a transcript as outbox rows, answering only the first chunk so the thread stays on it.
+fn replies(attachment: &PendingAttachment, transcript: &str, now: i64) -> Vec<NewOutboxMessage> {
+    chunks(transcript, CHUNK_LIMIT)
+        .into_iter()
+        .enumerate()
+        .map(|(index, chunk)| NewOutboxMessage {
+            chat_id: attachment.chat_id,
+            thread_id: (index == 0).then_some(attachment.message_id),
+            added_at: now,
+            message: reply_html(chunk, index == 0),
+        })
+        .collect()
 }
 
 /// Splits `text` into pieces of at most `limit` bytes without cutting a character in half.
@@ -641,6 +652,55 @@ mod tests {
             reply_html("</blockquote><b>x</b>", true),
             "Расшифровка:\n<blockquote>&lt;/blockquote&gt;&lt;b&gt;x&lt;/b&gt;</blockquote>"
         );
+    }
+
+    fn pending_attachment() -> PendingAttachment {
+        PendingAttachment {
+            id: 1,
+            chat_id: 42,
+            message_id: 7,
+            kind: AttachmentKind::Audio,
+            file_id: "file-1".to_owned(),
+            mime_type: None,
+            file_size: None,
+        }
+    }
+
+    #[test]
+    fn replies_marks_only_the_first_chunk_as_a_reply() {
+        let attachment = pending_attachment();
+
+        let messages = replies(&attachment, "Hello guys I am leaving", 1_700_000_000);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].chat_id, 42);
+        assert_eq!(messages[0].thread_id, Some(7));
+        assert_eq!(messages[0].added_at, 1_700_000_000);
+        assert!(messages[0].message.starts_with(REPLY_HEADER));
+    }
+
+    #[test]
+    fn replies_renders_one_header_for_a_long_transcript() {
+        let attachment = pending_attachment();
+        let transcript = "x".repeat(CHUNK_LIMIT + 1);
+
+        let messages = replies(&attachment, &transcript, 1_700_000_000);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].thread_id, Some(7));
+        assert!(messages[0].message.contains(REPLY_HEADER));
+        assert_eq!(messages[1].thread_id, None);
+        assert!(!messages[1].message.contains(REPLY_HEADER));
+    }
+
+    #[test]
+    fn replies_escapes_the_transcript() {
+        let attachment = pending_attachment();
+
+        let messages = replies(&attachment, "a <b> c", 1_700_000_000);
+
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].message.contains("&lt;b&gt;"));
     }
 
     #[test]

@@ -23,7 +23,7 @@ Ingestion never waits for transcription and vice versa: transcription runs in it
 
 ## Outbox
 
-The transcriber never sends a message itself. It queues the reply in an `outbox` table, and a delivery loop sends pending rows in order, paced to stay under Telegram's rate limits, marking each row as sent once Telegram accepts it. The delivery loop pauses only when the queue is empty, and queuing a reply ends that pause at once.
+The transcriber never sends a message itself. It queues the reply in an `outbox` table, and a delivery loop sends pending rows in order, paced to stay under Telegram's rate limits, marking each row as sent once Telegram accepts it. The delivery loop pauses only when the queue is empty, and queuing a reply ends that pause at once. The replies of one transcript and the marker that completes its attachment are written in a single transaction.
 
 ## Replies
 

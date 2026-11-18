@@ -1,7 +1,7 @@
 # ADR 0008: Queue outgoing replies in an outbox
 
 - Status: accepted
-- Amended: 2026-11-18, to record rendering, batching, the source-time join, and producer duplication.
+- Amended: 2026-11-18, to record rendering, batching, the source-time join, and producer atomicity.
 - Date: 2026-11-17
 
 ## Context
@@ -25,6 +25,9 @@ Read rows in id order in batches of ten, pause two seconds between sends as the 
 pause five seconds when the queue is empty. The source message's Telegram time is read through a left
 join on `messages`, not stored, so the latency metric needs no schema change.
 
+A transcript's reply rows and the marker that completes its attachment are written in one
+transaction, the marker first. A run that finds the marker already set queues nothing.
+
 ## Consequences
 
 - a reply survives a restart, a crash, and a slow or unavailable platform
@@ -33,8 +36,8 @@ join on `messages`, not stored, so the latency metric needs no schema change.
 - delivery is at-least-once: an interruption between a successful send and the marker that follows
   re-sends that one message
 - a record the platform rejects forever is retried on every pass, because nothing counts attempts
-- the table has no producer-side dedupe key, so a producer that fails after writing part of a
-  transcript can queue the same rows again on retry
+- a transcript's replies and its completion marker commit together, so a producer that fails before
+  the commit leaves nothing queued and a retry cannot duplicate the first attempt's rows
 - delivered rows are never pruned, so the queue only grows
 
 ## Alternatives considered

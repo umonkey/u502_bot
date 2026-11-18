@@ -27,6 +27,8 @@ Some attachments are marked processed without a transcript, because a retry coul
 
 A download or model failure is retried on every scan while the source message is at most an hour old. The one-hour window bounds both the cost of a failing attachment and the number of retries; an attachment that ages out is never transcribed later.
 
+Queueing the replies and marking the attachment processed are one transaction. A crash or a rejected statement before the commit leaves the attachment pending and queues nothing, so the retry starts from scratch instead of delivering a chunk twice. An attachment another writer already completed is skipped rather than queued again.
+
 The loop pauses only when a scan finds nothing to transcribe, and storing a new attachment ends that pause at once. A failed attachment is still retried on the pause's cadence, rather than immediately.
 
 ## Reply latency

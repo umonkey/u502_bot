@@ -185,7 +185,8 @@ impl AttachmentRepository {
     ///
     /// `transcribed` means "processed: transcribed or deliberately skipped", not "has a transcript":
     /// a row whose chat is not white-listed is marked here too, because leaving it pending would
-    /// repeat the same skip on every scan for the length of the window.
+    /// repeat the same skip on every scan for the length of the window. This form is for an
+    /// attachment finished without a reply; the transcript path marks it inside its transaction.
     pub async fn mark_transcribed(&self, id: i64) -> Result<()> {
         sqlx::query("UPDATE attachments SET transcribed = 1 WHERE id = ?")
             .bind(id)

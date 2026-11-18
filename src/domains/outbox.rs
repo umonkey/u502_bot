@@ -6,7 +6,7 @@
 //! is escaped Telegram HTML, because the sender posts every row with `ParseMode::Html`.
 //! [`OutboxRepository`] must stay in sync with the `outbox` table in `dev/schema.sql`.
 
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, SqliteConnection, SqlitePool};
 
 use crate::shared::result::Result;
 
@@ -21,6 +21,14 @@ pub struct NewOutboxMessage {
     pub added_at: i64,
     /// Text to deliver: escaped Telegram HTML, rendered by the producer.
     pub message: String,
+}
+
+/// What [`OutboxRepository::enqueue_transcript`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnqueueOutcome {
+    Enqueued,
+    /// The attachment was already processed; nothing was written.
+    AlreadyProcessed,
 }
 
 /// One queued row that has not been delivered yet.
@@ -51,23 +59,41 @@ impl OutboxRepository {
         Self { pool }
     }
 
-    /// Queues one message and returns the id of the new row.
+    /// Queues every reply of one transcript and marks the attachment processed, atomically.
     ///
-    /// Must stay in sync with the `outbox` table in `dev/schema.sql`: `sent_at` is written as `NULL`
-    /// because a queued row is by definition undelivered.
-    pub async fn enqueue(&self, message: &NewOutboxMessage) -> Result<i64> {
-        let id = sqlx::query_scalar(
-            "INSERT INTO outbox (chat_id, thread_id, added_at, sent_at, message) \
-             VALUES (?, ?, ?, NULL, ?) RETURNING id",
-        )
-        .bind(message.chat_id)
-        .bind(message.thread_id)
-        .bind(message.added_at)
-        .bind(message.message.as_str())
-        .fetch_one(&self.pool)
-        .await?;
+    /// The marker and the rows commit together; [`EnqueueOutcome::AlreadyProcessed`] means another
+    /// writer finished this attachment first.
+    pub async fn enqueue_transcript(
+        &self,
+        attachment_id: i64,
+        messages: &[NewOutboxMessage],
+    ) -> Result<EnqueueOutcome> {
+        let mut transaction = self.pool.begin().await?;
 
-        Ok(id)
+        let marked =
+            sqlx::query("UPDATE attachments SET transcribed = 1 WHERE id = ? AND transcribed = 0")
+                .bind(attachment_id)
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected();
+
+        if marked == 0 {
+            transaction.rollback().await?;
+
+            return Ok(EnqueueOutcome::AlreadyProcessed);
+        }
+
+        for message in messages {
+            if let Err(error) = insert(&mut transaction, message).await {
+                let _ = transaction.rollback().await;
+
+                return Err(error);
+            }
+        }
+
+        transaction.commit().await?;
+
+        Ok(EnqueueOutcome::Enqueued)
     }
 
     /// Reads up to `limit` undelivered rows, oldest first.
@@ -116,6 +142,22 @@ impl OutboxRepository {
     }
 }
 
+/// Inserts one row on the caller's connection, so the caller can insert inside its own transaction.
+async fn insert(connection: &mut SqliteConnection, message: &NewOutboxMessage) -> Result<i64> {
+    let id = sqlx::query_scalar(
+        "INSERT INTO outbox (chat_id, thread_id, added_at, sent_at, message) \
+         VALUES (?, ?, ?, NULL, ?) RETURNING id",
+    )
+    .bind(message.chat_id)
+    .bind(message.thread_id)
+    .bind(message.added_at)
+    .bind(message.message.as_str())
+    .fetch_one(&mut *connection)
+    .await?;
+
+    Ok(id)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::domains::message::{MessageRepository, NewMessage};
@@ -158,14 +200,53 @@ mod tests {
         OutboxRepository::new(database.pool().clone())
     }
 
+    /// Queues one row through the production insert.
+    async fn queue(repository: &OutboxRepository, message: &NewOutboxMessage) -> i64 {
+        let mut connection = repository
+            .pool
+            .acquire()
+            .await
+            .expect("connection should be acquired");
+
+        insert(&mut connection, message)
+            .await
+            .expect("enqueue should succeed")
+    }
+
+    async fn store_attachment(repository: &OutboxRepository) -> i64 {
+        sqlx::query(
+            "INSERT INTO attachments (chat_id, message_id, kind, file_id) VALUES (?, ?, 'audio', ?) \
+             RETURNING id",
+        )
+        .bind(42_i64)
+        .bind(7_i64)
+        .bind("file-1")
+        .fetch_one(&repository.pool)
+        .await
+        .expect("attachment should store")
+        .get("id")
+    }
+
+    async fn transcribed(repository: &OutboxRepository, attachment_id: i64) -> i64 {
+        sqlx::query_scalar("SELECT transcribed FROM attachments WHERE id = ?")
+            .bind(attachment_id)
+            .fetch_one(&repository.pool)
+            .await
+            .expect("attachment should exist")
+    }
+
+    async fn outbox_rows(repository: &OutboxRepository) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM outbox")
+            .fetch_one(&repository.pool)
+            .await
+            .expect("count should succeed")
+    }
+
     #[tokio::test]
     async fn enqueue_writes_an_unsent_row() {
         let repository = in_memory_repository().await;
 
-        let id = repository
-            .enqueue(&new_outbox_message())
-            .await
-            .expect("enqueue should succeed");
+        let id = queue(&repository, &new_outbox_message()).await;
         assert_eq!(id, 1);
 
         let row = sqlx::query("SELECT chat_id, thread_id, added_at, sent_at, message FROM outbox")
@@ -188,10 +269,7 @@ mod tests {
                 message: text.to_owned(),
                 ..new_outbox_message()
             };
-            repository
-                .enqueue(&message)
-                .await
-                .expect("enqueue should succeed");
+            queue(&repository, &message).await;
         }
 
         let pending = repository
@@ -229,10 +307,7 @@ mod tests {
                 message: text.to_owned(),
                 ..new_outbox_message()
             };
-            repository
-                .enqueue(&message)
-                .await
-                .expect("enqueue should succeed");
+            queue(&repository, &message).await;
         }
 
         let pending = repository.pending(2).await.expect("pending should succeed");
@@ -245,10 +320,7 @@ mod tests {
     async fn mark_sent_is_idempotent() {
         let repository = in_memory_repository().await;
 
-        let id = repository
-            .enqueue(&new_outbox_message())
-            .await
-            .expect("enqueue should succeed");
+        let id = queue(&repository, &new_outbox_message()).await;
 
         repository
             .mark_sent(id, 1_700_000_100)
@@ -281,10 +353,7 @@ mod tests {
             ..new_outbox_message()
         };
 
-        repository
-            .enqueue(&message)
-            .await
-            .expect("enqueue should succeed");
+        queue(&repository, &message).await;
 
         let pending = repository
             .pending(10)
@@ -299,10 +368,7 @@ mod tests {
         let repository = in_memory_repository().await;
         store_source_message(&repository).await;
 
-        repository
-            .enqueue(&new_outbox_message())
-            .await
-            .expect("enqueue should succeed");
+        queue(&repository, &new_outbox_message()).await;
 
         let pending = repository
             .pending(10)
@@ -321,10 +387,7 @@ mod tests {
             ..new_outbox_message()
         };
 
-        repository
-            .enqueue(&message)
-            .await
-            .expect("enqueue should succeed");
+        queue(&repository, &message).await;
 
         let pending = repository
             .pending(10)
@@ -342,10 +405,7 @@ mod tests {
             ..new_outbox_message()
         };
 
-        repository
-            .enqueue(&message)
-            .await
-            .expect("enqueue should succeed");
+        queue(&repository, &message).await;
 
         let pending = repository
             .pending(10)
@@ -353,5 +413,122 @@ mod tests {
             .expect("pending should succeed");
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].source_at, None);
+    }
+
+    fn transcript_chunks(texts: &[&str]) -> Vec<NewOutboxMessage> {
+        texts
+            .iter()
+            .map(|text| NewOutboxMessage {
+                message: (*text).to_owned(),
+                ..new_outbox_message()
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn enqueue_transcript_writes_every_chunk_and_marks_the_attachment() {
+        let repository = in_memory_repository().await;
+        let attachment_id = store_attachment(&repository).await;
+        let messages = transcript_chunks(&["first", "second"]);
+
+        let outcome = repository
+            .enqueue_transcript(attachment_id, &messages)
+            .await
+            .expect("enqueue should succeed");
+
+        assert_eq!(outcome, EnqueueOutcome::Enqueued);
+        assert_eq!(outbox_rows(&repository).await, 2);
+        assert_eq!(transcribed(&repository, attachment_id).await, 1);
+
+        let unsent: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL")
+            .fetch_one(&repository.pool)
+            .await
+            .expect("count should succeed");
+        assert_eq!(unsent, 2);
+    }
+
+    #[tokio::test]
+    async fn enqueue_transcript_answers_only_the_first_chunk() {
+        let repository = in_memory_repository().await;
+        let attachment_id = store_attachment(&repository).await;
+        let messages = vec![
+            NewOutboxMessage {
+                thread_id: Some(7),
+                ..new_outbox_message()
+            },
+            NewOutboxMessage {
+                thread_id: None,
+                ..new_outbox_message()
+            },
+        ];
+
+        repository
+            .enqueue_transcript(attachment_id, &messages)
+            .await
+            .expect("enqueue should succeed");
+
+        let thread_ids: Vec<Option<i64>> =
+            sqlx::query_scalar("SELECT thread_id FROM outbox ORDER BY id")
+                .fetch_all(&repository.pool)
+                .await
+                .expect("rows should exist");
+        assert_eq!(thread_ids, vec![Some(7), None]);
+    }
+
+    #[tokio::test]
+    async fn enqueue_transcript_rolls_back_a_failed_chunk() {
+        let repository = in_memory_repository().await;
+        let attachment_id = store_attachment(&repository).await;
+        sqlx::query(
+            "CREATE TRIGGER reject_boom BEFORE INSERT ON outbox \
+             WHEN NEW.message = 'boom' \
+             BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+        )
+        .execute(&repository.pool)
+        .await
+        .expect("trigger should be created");
+        let messages = transcript_chunks(&["ok", "boom"]);
+
+        let outcome = repository
+            .enqueue_transcript(attachment_id, &messages)
+            .await;
+
+        assert!(outcome.is_err(), "a rejected chunk should fail the call");
+        assert_eq!(outbox_rows(&repository).await, 0);
+        assert_eq!(transcribed(&repository, attachment_id).await, 0);
+    }
+
+    #[tokio::test]
+    async fn enqueue_transcript_skips_an_already_processed_attachment() {
+        let repository = in_memory_repository().await;
+        let attachment_id = store_attachment(&repository).await;
+        let messages = transcript_chunks(&["first", "second"]);
+        let first = repository
+            .enqueue_transcript(attachment_id, &messages)
+            .await
+            .expect("first enqueue should succeed");
+        assert_eq!(first, EnqueueOutcome::Enqueued);
+
+        let second = repository
+            .enqueue_transcript(attachment_id, &messages)
+            .await
+            .expect("second enqueue should succeed");
+
+        assert_eq!(second, EnqueueOutcome::AlreadyProcessed);
+        assert_eq!(outbox_rows(&repository).await, 2);
+    }
+
+    #[tokio::test]
+    async fn enqueue_transcript_treats_a_missing_attachment_as_processed() {
+        let repository = in_memory_repository().await;
+        let messages = transcript_chunks(&["first"]);
+
+        let outcome = repository
+            .enqueue_transcript(99, &messages)
+            .await
+            .expect("enqueue should succeed");
+
+        assert_eq!(outcome, EnqueueOutcome::AlreadyProcessed);
+        assert_eq!(outbox_rows(&repository).await, 0);
     }
 }
