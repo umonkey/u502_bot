@@ -19,9 +19,9 @@ use crate::infra::telegram_bot::Telegram;
 use crate::infra::{database, sentry, signal};
 use crate::services::ingestor::Ingestor;
 use crate::services::outbox::Outbox;
-use crate::services::shutdown::Shutdown;
+use crate::services::shutdown::{self, ShutdownTrigger};
 use crate::services::transcriber::Transcriber;
-use crate::services::wake::Wake;
+use crate::services::wake;
 use crate::shared::result::Result;
 
 pub async fn run() -> ExitCode {
@@ -60,8 +60,8 @@ pub async fn run() -> ExitCode {
 async fn start(settings: Settings) -> Result<()> {
     // Registered first, so a signal that arrives during the slow startup work is remembered by the
     // sticky flag instead of killing the process.
-    let shutdown = Shutdown::new();
-    let _signals = tokio::spawn(watch_for_shutdown(shutdown.clone()));
+    let (shutdown_trigger, shutdown) = shutdown::channel();
+    let _signals = tokio::spawn(watch_for_shutdown(shutdown_trigger));
 
     let database = init_database(&settings.database_path).await?;
 
@@ -88,15 +88,15 @@ async fn start(settings: Settings) -> Result<()> {
     let pool = database.pool().clone();
 
     // One edge per pair of services: the ingestor wakes the transcriber when it stores an
-    // attachment, and the transcriber wakes the outbox when it queues a reply. The two handles are
-    // never shared, so neither consumer observes the other's work.
-    let pending_attachments = Wake::new();
-    let pending_replies = Wake::new();
+    // attachment, and the transcriber wakes the outbox when it queues a reply. Each edge has a
+    // sender and a receiver type, so the direction is a compile-time property of this wiring.
+    let (attachments_stored, pending_attachments) = wake::channel();
+    let (replies_queued, pending_replies) = wake::channel();
 
     let ingestor = Ingestor::new(
         telegram.messages(),
         MessageRepository::new(pool.clone()),
-        pending_attachments.clone(),
+        attachments_stored,
     );
     let transcriber = Transcriber::new(
         telegram.clone(),
@@ -106,7 +106,7 @@ async fn start(settings: Settings) -> Result<()> {
         OutboxRepository::new(pool.clone()),
         settings.transcribe_chats,
         pending_attachments,
-        pending_replies.clone(),
+        replies_queued,
     );
     let outbox = Outbox::new(telegram, OutboxRepository::new(pool), pending_replies);
 
@@ -129,14 +129,14 @@ async fn start(settings: Settings) -> Result<()> {
 }
 
 /// Requests shutdown when the process receives a signal that asks it to stop.
-async fn watch_for_shutdown(shutdown: Shutdown) {
+async fn watch_for_shutdown(trigger: ShutdownTrigger) {
     let signal = signal::wait().await;
 
     tracing::info!(
         signal = %signal,
         "Received a shutdown signal; stopping the services"
     );
-    shutdown.request();
+    trigger.request();
 }
 
 /// Opens the database at `path` and applies the embedded schema.

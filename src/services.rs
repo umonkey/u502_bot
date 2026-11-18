@@ -6,9 +6,11 @@
 //! owns neither: the clients live in `src/infra/`, the SQL lives in `src/domains/`, and the
 //! composition lives in `src/cli/`.
 //!
-//! The module also carries [`shutdown::Shutdown`], the stop signal the services share, so a command
-//! can ask every loop to end without knowing how any of them is written, and [`wake::Wake`], the
-//! one-way pulse a service sends a peer when it creates work, so an idle pause ends at once.
+//! The module also carries two one-way edges. [`shutdown`] carries the [`shutdown::ShutdownTrigger`]
+//! the command holds and the [`shutdown::Shutdown`] side each loop clones, so a command can ask
+//! every loop to end without knowing how any of them is written. [`wake`] carries the
+//! [`wake::WakeSender`] a producer pulses and the [`wake::WakeReceiver`] its peer waits on, so an
+//! idle pause ends at once.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

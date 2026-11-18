@@ -52,8 +52,8 @@ Running `make` without a target executes `check`.
 - `src/infra/signal.rs`: `Signal` and `wait`; the listener for `SIGINT` and, on Unix, `SIGTERM`.
 - `src/infra/telegram_bot.rs`: `Telegram` and `Messages`, the Telegram client; it receives, downloads, reacts, and sends, and knows nothing about storage.
 - `src/services.rs`: declares the long-running services, the shutdown flag they share, the shared time helpers, the idle pause, and the batch size.
-- `src/services/shutdown.rs`: `Shutdown`, the sticky cooperative flag that stops every service on one request.
-- `src/services/wake.rs`: `Wake`, the pulse a service sends another when it creates work, which ends the receiver's idle pause early.
+- `src/services/shutdown.rs`: `ShutdownTrigger`, the only side that can request shutdown, and `Shutdown`, the sticky cooperative flag every service clones and checks.
+- `src/services/wake.rs`: `WakeSender`, the only side that can pulse, and `WakeReceiver`, the only side that can wait out an idle pause.
 - `src/services/ingestor.rs`: the message loop; it stores every delivered message and its attachment metadata, drains what the dispatcher already queued, then stops polling.
 - `src/services/transcriber.rs`: the transcription loop for audio and video over the whitelist the composition root resolved; it processes an audio batch, then a video batch, and a video is downloaded and reduced with `ffmpeg` before it joins the audio flow.
 - `src/services/outbox.rs`: the delivery loop; it sends queued replies and marks them sent.

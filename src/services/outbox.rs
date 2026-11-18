@@ -11,7 +11,7 @@ use crate::domains::outbox::{OutboxRepository, PendingMessage};
 use crate::infra::sentry;
 use crate::infra::telegram_bot::Telegram;
 use crate::services::shutdown::Shutdown;
-use crate::services::wake::Wake;
+use crate::services::wake::WakeReceiver;
 use crate::services::{BATCH, IDLE, unix_now, unix_now_f64};
 
 /// Pause between two sends, so a burst does not hit Telegram's rate limit.
@@ -21,12 +21,16 @@ const SEND_DELAY: Duration = Duration::from_secs(2);
 pub struct Outbox {
     telegram: Telegram,
     repository: OutboxRepository,
-    pending_replies: Wake,
+    pending_replies: WakeReceiver,
 }
 
 impl Outbox {
     /// Creates the service over the client and the repository the command composed.
-    pub fn new(telegram: Telegram, repository: OutboxRepository, pending_replies: Wake) -> Self {
+    pub fn new(
+        telegram: Telegram,
+        repository: OutboxRepository,
+        pending_replies: WakeReceiver,
+    ) -> Self {
         Self {
             telegram,
             repository,

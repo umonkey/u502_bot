@@ -25,7 +25,7 @@ use crate::infra::openrouter::{AudioFormat, OpenRouter};
 use crate::infra::sentry;
 use crate::infra::telegram_bot::Telegram;
 use crate::services::shutdown::Shutdown;
-use crate::services::wake::Wake;
+use crate::services::wake::{WakeReceiver, WakeSender};
 use crate::services::{BATCH, IDLE, unix_now};
 use crate::shared::result::{Error, Result};
 
@@ -60,8 +60,8 @@ pub struct Transcriber {
     attachments: AttachmentRepository,
     outbox: OutboxRepository,
     chats: Whitelist,
-    pending_attachments: Wake,
-    pending_replies: Wake,
+    pending_attachments: WakeReceiver,
+    pending_replies: WakeSender,
 }
 
 impl Transcriber {
@@ -76,8 +76,8 @@ impl Transcriber {
         attachments: AttachmentRepository,
         outbox: OutboxRepository,
         chats: Whitelist,
-        pending_attachments: Wake,
-        pending_replies: Wake,
+        pending_attachments: WakeReceiver,
+        pending_replies: WakeSender,
     ) -> Self {
         Self {
             telegram,

@@ -12,13 +12,13 @@ use crate::domains::message::{MessageRepository, NewMessage};
 use crate::infra::sentry;
 use crate::infra::telegram_bot::Messages;
 use crate::services::shutdown::Shutdown;
-use crate::services::wake::Wake;
+use crate::services::wake::WakeSender;
 
 /// Reads incoming Telegram messages and stores each one with its attachment.
 pub struct Ingestor {
     messages: Messages,
     messages_repo: MessageRepository,
-    pending_attachments: Wake,
+    pending_attachments: WakeSender,
 }
 
 impl Ingestor {
@@ -26,7 +26,7 @@ impl Ingestor {
     pub fn new(
         messages: Messages,
         messages_repo: MessageRepository,
-        pending_attachments: Wake,
+        pending_attachments: WakeSender,
     ) -> Self {
         Self {
             messages,
