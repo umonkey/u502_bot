@@ -14,8 +14,9 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::infra::config::{VariableName, get_optional};
+use crate::infra::config::get_optional;
 use crate::infra::sentry;
+use crate::shared::config::VariableName;
 use crate::shared::result::{Error, Result};
 
 /// Binary used when [`VariableName::FfmpegPath`] is unset or cannot be read.

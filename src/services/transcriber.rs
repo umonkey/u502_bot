@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use crate::domains::attachment::{AttachmentKind, AttachmentRepository, PendingAttachment};
 use crate::domains::outbox::{NewOutboxMessage, OutboxRepository};
-use crate::infra::config::{VariableName, get_optional};
+use crate::infra::config::get_optional;
 use crate::infra::ffmpeg::Ffmpeg;
 use crate::infra::openrouter::{AudioFormat, OpenRouter};
 use crate::infra::sentry;
@@ -28,6 +28,7 @@ use crate::infra::telegram_bot::Telegram;
 use crate::services::shutdown::Shutdown;
 use crate::services::unix_now;
 use crate::services::wake::Wake;
+use crate::shared::config::VariableName;
 use crate::shared::result::{Error, Result};
 
 /// Plain-text header placed above the transcript in the first reply.

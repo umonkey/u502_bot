@@ -8,7 +8,7 @@ use std::process::ExitCode;
 use crate::domains::attachment::AttachmentRepository;
 use crate::domains::message::MessageRepository;
 use crate::domains::outbox::OutboxRepository;
-use crate::infra::config::{VariableName, require_secret};
+use crate::infra::config::require_secret;
 use crate::infra::ffmpeg::Ffmpeg;
 use crate::infra::openrouter::{self, OpenRouter};
 use crate::infra::telegram_bot::Telegram;
@@ -18,6 +18,7 @@ use crate::services::outbox::Outbox;
 use crate::services::shutdown::Shutdown;
 use crate::services::transcriber::{Transcriber, Whitelist};
 use crate::services::wake::Wake;
+use crate::shared::config::VariableName;
 use crate::shared::result::Result;
 
 pub async fn run() -> ExitCode {

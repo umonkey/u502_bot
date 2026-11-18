@@ -24,7 +24,7 @@ is trimmed of surrounding whitespace, and a value that is blank after trimming c
 Values are UTF-8. A non-Unicode variable, an unreadable file, and a file that is not UTF-8 are typed
 errors that name the variable or the path, never a panic and never an empty value.
 
-`VariableName` names every variable in `src/infra/config.rs`, `get_optional` is the resolver, and
+`VariableName` names every variable, `get_optional` is the resolver, and
 `require_secret` turns absence into an error for the variables startup cannot run without, so a
 missing required value exits non-zero and the supervisor restarts the process. No secret value is
 logged.

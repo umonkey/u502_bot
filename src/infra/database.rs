@@ -11,7 +11,8 @@ use std::time::Duration;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 use sqlx::{Sqlite, pool::PoolOptions};
 
-use crate::infra::config::{VariableName, require_secret};
+use crate::infra::config::require_secret;
+use crate::shared::config::VariableName;
 use crate::shared::result::{Error, Result};
 
 /// Startup schema, baked into the binary at build time.

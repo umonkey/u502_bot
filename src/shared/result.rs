@@ -2,15 +2,16 @@
 //!
 //! One [`Error`] enum so every failure mode the bot can produce is discoverable from this one
 //! file, one [`Result`] alias so every fallible signature reads the same, one variant per failure
-//! mode, and one `Display` implementation that names what failed while [`Error::source`] chains
-//! the cause. The enum is flat rather than nested per module so a caller never has to import a
-//! second type to match a failure; the comment above each group names the area.
+//! mode, and one `Display` implementation that names what failed while
+//! [`Error::source`](std::error::Error::source) chains the cause. The enum is flat rather than
+//! nested per module so a caller never has to import a second type to match a failure; the comment
+//! above each group names the area.
 
 use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
-use crate::infra::config::VariableName;
+use crate::shared::config::VariableName;
 
 /// Every result in this crate.
 pub type Result<T, E = Error> = std::result::Result<T, E>;

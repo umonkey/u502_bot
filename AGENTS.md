@@ -44,7 +44,7 @@ Running `make` without a target executes `check`.
 - `src/domains/message.rs`: the message model and the repository that owns the `messages` SQL.
 - `src/domains/outbox.rs`: the outbox model and the repository that owns the `outbox` SQL.
 - `src/infra.rs`: declares the infra modules.
-- `src/infra/config.rs`: `VariableName`, the enum naming every environment variable, plus `get_optional` and `require_secret`; one resolver gives every variable the same form: `<NAME>_FILE` first, then `<NAME>`, the value trimmed, blank meaning unset, UTF-8 only.
+- `src/infra/config.rs`: `get_optional` and `require_secret`; one resolver gives every variable the same form: `<NAME>_FILE` first, then `<NAME>`, the value trimmed, blank meaning unset, UTF-8 only.
 - `src/infra/database.rs`: `Database`, `database_path`, and `SCHEMA`; the async SQLite client, which opens a pooled connection and applies the embedded schema without knowing any table.
 - `src/infra/ffmpeg.rs`: `Ffmpeg`; the client for the `ffmpeg` program, which extracts a video's first audio track to Ogg/Opus under a timeout, kills the child on drop, and records its own call telemetry. The binary path comes from `VariableName::FfmpegPath`; an unusable value, whether non-UTF-8 or an unreadable `FFMPEG_PATH_FILE`, logs one warning and falls back to the `ffmpeg` on `PATH`.
 - `src/infra/openrouter.rs`: `OpenRouter`, `model_from_env`, `DEFAULT_TRANSCRIBE_MODEL`, and `AudioFormat`; the Speech-to-Text client for audio transcription, which records its own call telemetry.
@@ -58,6 +58,7 @@ Running `make` without a target executes `check`.
 - `src/services/transcriber.rs`: the transcription loop for audio and video and the `TRANSCRIBE_CHATS` whitelist; it processes an audio batch, then a video batch, and a video is downloaded and reduced with `ffmpeg` before it joins the audio flow.
 - `src/services/outbox.rs`: the delivery loop; it sends queued replies and marks them sent.
 - `src/shared.rs` / `src/shared/result.rs`: the crate-wide `Error` enum, with one variant per failure mode the bot can produce, and the `Result<T>` alias every fallible function returns; any layer may use them.
+- `src/shared/config.rs`: `VariableName`, the enum naming every environment variable; resolution stays in `src/infra/config.rs`.
 - `src/shared/metrics.rs`: `MetricName`, the enum naming every application metric the bot records, with the exact Sentry wire name behind `as_str`; recording stays in `src/infra/sentry.rs`, which owns the client.
 - `dev/schema.sql`: initial SQLite schema, embedded at build time and applied on every startup.
 
@@ -65,8 +66,8 @@ Add every new subcommand as a variant of the `Command` enum in `src/cli/mod.rs`,
 
 ## Layering
 
-- `src/shared/*`: cross-cutting types every layer may use; never a client, SQL, or a loop.
-- `src/infra/*`: clients for exactly one external system; they never call each other, hold SQL, or contain domain logic. Configuration lookup and the observability sink are the exceptions: both are shared services rather than peer integrations.
+- `src/shared/*`: cross-cutting types every layer may use; never a client, SQL, or a loop, and nothing here names a layer above it.
+- `src/infra/*`: clients for exactly one external system; they never call each other, hold SQL, or contain domain logic. The observability sink is the exception: it is a shared service rather than a peer integration.
 - `src/domains/*`: models and repositories; each repository owns the SQL for its data.
 - `src/services/*`: long-running tasks a command composes; they loop over time, own no SQL and no clients of their own, and hold the clients and repositories they were given.
 - `src/cli/*`: commands compose the clients, the repositories, and the services; the Telegram client must not know that a database exists.

@@ -20,8 +20,9 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 
-use crate::infra::config::{VariableName, get_optional};
+use crate::infra::config::get_optional;
 use crate::infra::sentry;
+use crate::shared::config::VariableName;
 use crate::shared::result::{Error, Result};
 
 /// Model used when [`VariableName::TranscribeModelName`] is unset or empty.

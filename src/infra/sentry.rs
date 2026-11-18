@@ -19,7 +19,8 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{Layer, filter::EnvFilter};
 
-use crate::infra::config::{VariableName, get_optional};
+use crate::infra::config::get_optional;
+use crate::shared::config::VariableName;
 use crate::shared::metrics::MetricName;
 
 /// Log level forwarded to Sentry. Fixed so `RUST_LOG` stays a console-only control.
