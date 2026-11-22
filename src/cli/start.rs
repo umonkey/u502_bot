@@ -10,6 +10,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use crate::domains::attachment::AttachmentRepository;
+use crate::domains::chat::ChatRepository;
 use crate::domains::message::MessageRepository;
 use crate::domains::outbox::OutboxRepository;
 use crate::infra::config::{self, Settings};
@@ -17,6 +18,7 @@ use crate::infra::ffmpeg::Ffmpeg;
 use crate::infra::openrouter::OpenRouter;
 use crate::infra::telegram_bot::Telegram;
 use crate::infra::{database, sentry, signal};
+use crate::services::admin::Admin;
 use crate::services::ingestor::Ingestor;
 use crate::services::outbox::Outbox;
 use crate::services::pruner::Pruner;
@@ -65,12 +67,24 @@ async fn start(settings: Settings) -> Result<()> {
     let _signals = tokio::spawn(watch_for_shutdown(shutdown_trigger));
 
     let database = init_database(&settings.database_path).await?;
+    // Cloned before the startup logs, because the registry gate is one of them.
+    let pool = database.pool().clone();
 
-    if settings.transcribe_chats.is_empty() {
-        tracing::warn!(
-            "TRANSCRIBE_CHATS is empty: no chat is transcribed. Audio and video are skipped and each skip logs its chat id, so add the ids you want transcribed to TRANSCRIBE_CHATS."
-        );
+    match ChatRepository::new(pool.clone()).approved().await {
+        Ok(approved) if approved.is_empty() => tracing::warn!(
+            owner_user_id = settings.owner_user_id,
+            "No chat is approved yet: the owner approves one with /approve <id> in a direct message"
+        ),
+        Ok(_) => {}
+        Err(error) => tracing::error!(
+            error = &error as &dyn std::error::Error,
+            "Failed to read the approved chats"
+        ),
     }
+    tracing::info!(
+        owner_user_id = settings.owner_user_id,
+        "Only this user id can manage the chats, from a direct message; see /help there"
+    );
 
     match settings.retention_days {
         Some(days) => tracing::info!(
@@ -94,7 +108,6 @@ async fn start(settings: Settings) -> Result<()> {
     let openrouter = OpenRouter::new(settings.openrouter_api_key, settings.transcribe_model)?;
     let telegram = Telegram::connect(settings.telegram_api_token).await?;
 
-    let pool = database.pool().clone();
     let retention_days = settings.retention_days;
 
     // One edge per pair of services: the ingestor wakes the transcriber when it stores an
@@ -103,9 +116,16 @@ async fn start(settings: Settings) -> Result<()> {
     let (attachments_stored, pending_attachments) = wake::channel();
     let (replies_queued, pending_replies) = wake::channel();
 
+    let admin = Admin::new(
+        telegram.clone(),
+        ChatRepository::new(pool.clone()),
+        settings.owner_user_id,
+    );
     let ingestor = Ingestor::new(
         telegram.messages(),
         MessageRepository::new(pool.clone()),
+        ChatRepository::new(pool.clone()),
+        admin,
         attachments_stored,
     );
     let transcriber = Transcriber::new(
@@ -114,7 +134,7 @@ async fn start(settings: Settings) -> Result<()> {
         ffmpeg,
         AttachmentRepository::new(pool.clone()),
         OutboxRepository::new(pool.clone()),
-        settings.transcribe_chats,
+        ChatRepository::new(pool.clone()),
         pending_attachments,
         replies_queued,
     );

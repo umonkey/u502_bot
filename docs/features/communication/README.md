@@ -1,6 +1,6 @@
 # Communication
 
-How the bot talks to Telegram: it receives every message in the chats it belongs to and answers with transcripts through a queue.
+How the bot talks to Telegram: it receives every message in the chats it belongs to, answers the owner's commands directly, and delivers transcripts through a queue.
 
 ## Telegram connection
 
@@ -20,6 +20,12 @@ The token comes from `TELEGRAM_API_TOKEN` or its `_FILE` form, and `docker compo
 Every message Telegram delivers is logged and stored in SQLite; a redelivery of the same message is skipped by the `(chat_id, message_id)` uniqueness. Text and captions are stored as they arrive. Audio and video also record the metadata transcription needs: a `file_id`, a MIME type, a duration, and a size. Other media is stored as a message with its caption, without being downloaded or recorded as an attachment.
 
 Ingestion never waits for transcription and vice versa: transcription runs in its own loop and reads what ingestion stored. See [storage](../storage/README.md) for the columns and [transcription](../transcription/README.md) for what happens to the attachments.
+
+## Owner commands
+
+The ingestor also carries the owner's control over transcription. A message in the owner's direct conversation that begins with a slash command is answered at once: a recognised command does its work, and any other one returns the help text. Answers are sent directly rather than queued, so the outbox stays reserved for transcripts. The four commands are in [access](../access/README.md).
+
+A command from anywhere else, and ordinary text in the owner's direct conversation, is ignored; the message is still stored like any other. The bot also tells the owner, by direct message, when it records a chat for the first time. Both sends are best effort: a failure is logged and nothing is retried, because a lost answer can be repeated with another command.
 
 ## Outbox
 

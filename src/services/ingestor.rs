@@ -2,35 +2,45 @@
 //!
 //! The message and its attachment commit together through [`MessageRepository`], so an attachment
 //! failure leaves neither row. Both are written in one transaction because a later reader age-bounds
-//! an attachment by the message that carries it.
+//! an attachment by the message that carries it. Every delivery also records the chat it came from
+//! and, when it is a command from the owner, answers it.
 
-use teloxide::types::{Message, User};
+use teloxide::types::{Chat, Message, User};
 
 use crate::domains::InsertOutcome;
 use crate::domains::attachment::{AttachmentKind, NewAttachment};
+use crate::domains::chat::{ChatRepository, NewChat};
 use crate::domains::message::{MessageRepository, NewMessage};
 use crate::infra::sentry;
 use crate::infra::telegram_bot::Messages;
+use crate::services::admin::Admin;
 use crate::services::shutdown::Shutdown;
+use crate::services::unix_now;
 use crate::services::wake::WakeSender;
 
 /// Reads incoming Telegram messages and stores each one with its attachment.
 pub struct Ingestor {
     messages: Messages,
     messages_repo: MessageRepository,
+    chats: ChatRepository,
+    admin: Admin,
     pending_attachments: WakeSender,
 }
 
 impl Ingestor {
-    /// Creates the service over a message stream and the repository that owns the transaction.
+    /// Creates the service over a message stream and the repositories the deliveries touch.
     pub fn new(
         messages: Messages,
         messages_repo: MessageRepository,
+        chats: ChatRepository,
+        admin: Admin,
         pending_attachments: WakeSender,
     ) -> Self {
         Self {
             messages,
             messages_repo,
+            chats,
+            admin,
             pending_attachments,
         }
     }
@@ -71,6 +81,10 @@ impl Ingestor {
     /// Both rows commit together, so an attachment the database rejects leaves no message row
     /// either. Nothing retries a rolled-back delivery: Telegram acknowledged the update when the
     /// dispatcher fetched it.
+    ///
+    /// A registry failure is logged and never fails the delivery: losing a message to a registry
+    /// write would lose it forever, because Telegram acknowledged the update when the dispatcher
+    /// fetched it.
     async fn ingest(&self, message: &Message) {
         sentry::message_received();
         tracing::info!(
@@ -84,6 +98,36 @@ impl Ingestor {
             "Received message"
         );
         log_media(message);
+
+        let now = unix_now();
+        let chat = NewChat {
+            chat_id: message.chat.id.0,
+            kind: chat_kind(&message.chat),
+            title: message.chat.title().map(str::to_owned),
+            added_at: now,
+            seen_at: now,
+        };
+        match self.chats.record(&chat).await {
+            Ok(InsertOutcome::Stored) => {
+                tracing::info!(
+                    chat_id = chat.chat_id,
+                    kind = chat.kind,
+                    title = chat.title.as_deref(),
+                    "Recorded a chat"
+                );
+                self.admin.announce(&message.chat).await;
+            }
+            Ok(InsertOutcome::Duplicate) => {}
+            Err(error) => tracing::error!(
+                error = &error as &dyn std::error::Error,
+                chat_id = chat.chat_id,
+                "Failed to record the chat"
+            ),
+        }
+
+        if self.admin.accepts(message) {
+            self.admin.handle(message).await;
+        }
 
         let attachment = new_attachment(message);
         if let Some(attachment) = &attachment {
@@ -200,6 +244,24 @@ fn log_media(message: &Message) {
             file_id = %video.file.id,
             "Video received"
         );
+    }
+}
+
+/// Classifies a chat into the coarse kind the registry stores.
+///
+/// Telegram's own vocabulary is kept verbatim, because nothing branches on it and an operator reads
+/// it in `/chats`; `"unknown"` only covers a kind this build does not name.
+fn chat_kind(chat: &Chat) -> &'static str {
+    if chat.is_private() {
+        "private"
+    } else if chat.is_group() {
+        "group"
+    } else if chat.is_supergroup() {
+        "supergroup"
+    } else if chat.is_channel() {
+        "channel"
+    } else {
+        "unknown"
     }
 }
 

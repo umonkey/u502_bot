@@ -119,7 +119,7 @@ pub fn attachment_stored() {
 /// Records one audio attachment the transcriber finished with.
 ///
 /// The `transcribed` flag means "processed", so an attachment skipped because its chat is not
-/// white-listed counts too.
+/// approved counts too.
 pub fn attachment_transcribed() {
     count(MetricName::TelegramAttachmentsTranscribed);
 }

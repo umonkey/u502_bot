@@ -16,7 +16,6 @@
 //! only for the fields startup cannot run without. `RUST_LOG` is the one exception:
 //! `tracing_subscriber`'s `EnvFilter` reads it, not this crate, and it has no file form.
 
-use std::collections::HashSet;
 use std::env::VarError;
 use std::io;
 use std::path::PathBuf;
@@ -37,7 +36,7 @@ pub struct Settings {
     pub telegram_api_token: String,
     pub openrouter_api_key: String,
     pub transcribe_model: String,
-    pub transcribe_chats: Whitelist,
+    pub owner_user_id: i64,
     /// `Some(days)` keeps that many days of rows, `None` keeps every row.
     pub retention_days: Option<u32>,
     pub database_path: PathBuf,
@@ -54,15 +53,14 @@ impl Settings {
         lookup: impl AsyncFn(VariableName) -> Result<Option<String>>,
     ) -> Result<Self> {
         let database_path = require(&lookup, VariableName::DatabasePath).await?.into();
+        let owner_user_id = owner_user_id(&require(&lookup, VariableName::OwnerUserId).await?)?;
         Ok(Self {
             telegram_api_token: require(&lookup, VariableName::TelegramApiToken).await?,
             openrouter_api_key: require(&lookup, VariableName::OpenRouterApiKey).await?,
             transcribe_model: lookup(VariableName::TranscribeModelName)
                 .await?
                 .unwrap_or_else(|| DEFAULT_TRANSCRIBE_MODEL.to_owned()),
-            transcribe_chats: lookup(VariableName::TranscribeChats)
-                .await?
-                .map_or_else(|| Ok(Whitelist::default()), |raw| Whitelist::parse(&raw))?,
+            owner_user_id,
             retention_days: match lookup(VariableName::RetentionDays).await? {
                 Some(raw) => retention_days(&raw)?,
                 None => Some(DEFAULT_RETENTION_DAYS),
@@ -95,6 +93,23 @@ async fn require(
     lookup(name).await?.ok_or(Error::MissingVariable(name))
 }
 
+/// Parses `OWNER_USER_ID`.
+///
+/// Telegram user ids are positive, so a negative or zero value is a configuration mistake: it would
+/// never match a private chat, and the registry could never be managed. A non-numeric value fails for
+/// the same reason every other unusable required value does.
+fn owner_user_id(raw: &str) -> Result<i64> {
+    let id: i64 = raw
+        .parse()
+        .map_err(|_| Error::InvalidOwnerUserId(raw.to_owned()))?;
+
+    if id <= 0 {
+        return Err(Error::InvalidOwnerUserId(raw.to_owned()));
+    }
+
+    Ok(id)
+}
+
 /// Parses `RETENTION_DAYS`: a whole number of days, `0` meaning keep every row.
 fn retention_days(raw: &str) -> Result<Option<u32>> {
     let days: u32 = raw
@@ -102,50 +117,6 @@ fn retention_days(raw: &str) -> Result<Option<u32>> {
         .map_err(|_| Error::InvalidRetentionDays(raw.to_owned()))?;
 
     Ok((days > 0).then_some(days))
-}
-
-/// The chats whose audio and video are transcribed.
-///
-/// Membership is a configuration decision, not data, so the check happens after the scan: a chat
-/// that is not listed is logged once and marked processed. An empty whitelist is allowed and
-/// transcribes nothing, which is how an operator discovers the chat ids from the skip warnings.
-#[derive(Default)]
-pub struct Whitelist(HashSet<i64>);
-
-impl Whitelist {
-    /// Parses a comma-separated list of numeric chat ids.
-    ///
-    /// Entries are trimmed, empty entries are ignored, and duplicates collapse. An empty list is
-    /// valid and means "transcribe nothing": the bot still runs, so the skip warnings can publish
-    /// the chat ids before the list is known. A non-numeric entry is an error, so a typo cannot
-    /// silently narrow the list.
-    pub fn parse(raw: &str) -> Result<Self> {
-        let mut chats = HashSet::new();
-
-        for token in raw.split(',') {
-            let token = token.trim();
-            if token.is_empty() {
-                continue;
-            }
-
-            let chat_id = token
-                .parse()
-                .map_err(|_| Error::InvalidChatId(token.to_owned()))?;
-            chats.insert(chat_id);
-        }
-
-        Ok(Self(chats))
-    }
-
-    /// Returns whether `chat_id` may be transcribed.
-    pub fn contains(&self, chat_id: i64) -> bool {
-        self.0.contains(&chat_id)
-    }
-
-    /// Returns whether no chat is white-listed, in which case every attachment is skipped.
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
 }
 
 /// Resolves one environment variable.
@@ -209,6 +180,7 @@ mod tests {
             (VariableName::TelegramApiToken, "token"),
             (VariableName::OpenRouterApiKey, "key"),
             (VariableName::DatabasePath, "/tmp/u502.sqlite"),
+            (VariableName::OwnerUserId, "99"),
         ]
     }
 
@@ -232,10 +204,7 @@ mod tests {
     #[tokio::test]
     async fn required_values_are_loaded() {
         let mut values = required_values();
-        values.extend([
-            (VariableName::TranscribeModelName, "openai/whisper-1"),
-            (VariableName::TranscribeChats, "1,2"),
-        ]);
+        values.extend([(VariableName::TranscribeModelName, "openai/whisper-1")]);
 
         let settings = settings(&values)
             .await
@@ -245,8 +214,7 @@ mod tests {
         assert_eq!(settings.openrouter_api_key, "key");
         assert_eq!(settings.transcribe_model, "openai/whisper-1");
         assert_eq!(settings.database_path, PathBuf::from("/tmp/u502.sqlite"));
-        assert!(settings.transcribe_chats.contains(1));
-        assert!(settings.transcribe_chats.contains(2));
+        assert_eq!(settings.owner_user_id, 99);
         assert!(matches!(&settings.sentry_dsn, SentryDsn::Disabled(_)));
     }
 
@@ -255,6 +223,7 @@ mod tests {
         let values = [
             (VariableName::OpenRouterApiKey, "key"),
             (VariableName::DatabasePath, "/tmp/u502.sqlite"),
+            (VariableName::OwnerUserId, "99"),
         ];
 
         assert!(matches!(
@@ -268,6 +237,7 @@ mod tests {
         let values = [
             (VariableName::TelegramApiToken, "token"),
             (VariableName::DatabasePath, "/tmp/u502.sqlite"),
+            (VariableName::OwnerUserId, "99"),
         ];
 
         assert!(matches!(
@@ -290,37 +260,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_configured_chat_list_is_parsed() {
-        let mut values = required_values();
-        values.push((VariableName::TranscribeChats, " 1 , 2 ,3 "));
+    async fn missing_owner_fails() {
+        let values = [
+            (VariableName::TelegramApiToken, "token"),
+            (VariableName::OpenRouterApiKey, "key"),
+            (VariableName::DatabasePath, "/tmp/u502.sqlite"),
+        ];
 
-        let settings = settings(&values).await.expect("a chat list should parse");
-
-        assert!(settings.transcribe_chats.contains(1));
-        assert!(settings.transcribe_chats.contains(2));
-        assert!(settings.transcribe_chats.contains(3));
-        assert!(!settings.transcribe_chats.contains(4));
+        assert!(matches!(
+            settings_error(&values).await,
+            Error::MissingVariable(VariableName::OwnerUserId)
+        ));
     }
 
     #[tokio::test]
-    async fn a_malformed_chat_list_fails() {
+    async fn non_numeric_owner_fails() {
         let mut values = required_values();
-        values.push((VariableName::TranscribeChats, "1,two,3"));
+        values.retain(|(name, _)| *name != VariableName::OwnerUserId);
+        values.push((VariableName::OwnerUserId, "not-a-number"));
 
         match settings_error(&values).await {
-            Error::InvalidChatId(token) => assert_eq!(token, "two"),
-            other => panic!("expected a non-numeric entry, got {other}"),
+            Error::InvalidOwnerUserId(value) => assert_eq!(value, "not-a-number"),
+            other => panic!("expected an invalid owner id, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn non_positive_owner_fails() {
+        for raw in ["0", "-1"] {
+            let mut values = required_values();
+            values.retain(|(name, _)| *name != VariableName::OwnerUserId);
+            values.push((VariableName::OwnerUserId, raw));
+
+            match settings_error(&values).await {
+                Error::InvalidOwnerUserId(value) => assert_eq!(value, raw),
+                other => panic!("expected an invalid owner id, got {other}"),
+            }
         }
     }
 
     #[tokio::test]
     async fn an_unusable_optional_value_fails() {
-        let error = match Settings::from_lookup(async |name| {
-            if name == VariableName::TranscribeModelName {
-                Err(Error::VariableNotUnicode(name))
-            } else {
-                Ok(Some("value".to_owned()))
-            }
+        let error = match Settings::from_lookup(async |name| match name {
+            VariableName::TranscribeModelName => Err(Error::VariableNotUnicode(name)),
+            VariableName::OwnerUserId => Ok(Some("99".to_owned())),
+            _ => Ok(Some("value".to_owned())),
         })
         .await
         {
@@ -430,51 +414,6 @@ mod tests {
             SentryDsn::Disabled(reason) => assert_eq!(reason, expected),
             SentryDsn::Configured(_) => panic!("an unusable DSN should disable reporting"),
         }
-    }
-
-    #[test]
-    fn whitelist_parses_trimmed_and_spaced_ids() {
-        let whitelist = Whitelist::parse(" 1 , 2 ,3 ").expect("a spaced list should parse");
-
-        assert!(whitelist.contains(1));
-        assert!(whitelist.contains(2));
-        assert!(whitelist.contains(3));
-        assert!(!whitelist.contains(4));
-    }
-
-    #[test]
-    fn whitelist_collapses_duplicates_and_trailing_commas() {
-        let whitelist = Whitelist::parse("1,1,2,").expect("duplicates should parse");
-
-        assert!(whitelist.contains(1));
-        assert!(whitelist.contains(2));
-    }
-
-    #[test]
-    fn whitelist_allows_an_empty_list() {
-        for raw in ["", "   ", ",", " , "] {
-            let whitelist = Whitelist::parse(raw).expect("an empty list should parse");
-
-            assert!(whitelist.is_empty(), "raw {raw:?}");
-            assert!(!whitelist.contains(1));
-        }
-    }
-
-    #[test]
-    fn whitelist_rejects_a_non_numeric_entry() {
-        match Whitelist::parse("1,two,3") {
-            Err(Error::InvalidChatId(token)) => assert_eq!(token, "two"),
-            Err(other) => panic!("expected a non-numeric entry, got {other}"),
-            Ok(_) => panic!("expected a non-numeric entry"),
-        }
-    }
-
-    #[test]
-    fn a_default_whitelist_is_empty() {
-        let whitelist = Whitelist::default();
-
-        assert!(whitelist.is_empty());
-        assert!(!whitelist.contains(1));
     }
 
     #[test]

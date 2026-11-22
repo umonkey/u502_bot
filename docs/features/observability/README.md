@@ -37,7 +37,9 @@ No metric carries attributes.
 
 ## Privacy
 
-The reported logs include message text, transcripts, chat ids, sender names, file ids, MIME types, and file names. Point the DSN at a project whose members may see that content. The DSN, the bot token, and the OpenRouter key are never logged, and the Sentry SDK's automatic PII enrichment stays off, so it adds nothing beyond what the bot reports itself.
+The reported logs include message text, transcripts, chat ids, chat titles, sender names, file ids, MIME types, and file names. Point the DSN at a project whose members may see that content. The DSN, the bot token, and the OpenRouter key are never logged, and the Sentry SDK's automatic PII enrichment stays off, so it adds nothing beyond what the bot reports itself.
+
+A change to a chat's status and a failure of the chat registry are logged too, so an approval or a block is visible after the fact.
 
 ## Shutdown
 

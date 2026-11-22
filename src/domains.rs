@@ -4,13 +4,15 @@
 //! two repositories share and nothing that belongs to one of them.
 
 pub mod attachment;
+pub mod chat;
 pub mod message;
 pub mod outbox;
 
 /// What an idempotent insert did with a row.
 ///
-/// Both repositories insert with `ON CONFLICT (chat_id, message_id) DO NOTHING`, so the only
-/// silent case is a redelivery, and one type says so for both tables.
+/// Every repository inserts with `ON CONFLICT (<key>) DO NOTHING`, so the only silent case is a
+/// redelivery, and one type says so for the two `(chat_id, message_id)` tables and for the chat
+/// registry's `chat_id` insert alike.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InsertOutcome {
     /// The row was written.
