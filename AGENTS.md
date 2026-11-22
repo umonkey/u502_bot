@@ -4,14 +4,15 @@
 
 u502_bot is a Rust Telegram bot for a local car community.
 
-`u502 start` connects to Telegram with long polling through `teloxide`, logs every incoming message, and stores it in SQLite. Four long-running services run beside the connection: one ingests messages, one transcribes audio and video from white-listed chats through OpenRouter and queues the text, one delivers the queued replies, and one prunes rows older than the retention. The token comes from `TELEGRAM_API_TOKEN`, or from the file named by `TELEGRAM_API_TOKEN_FILE` when that is set.
+`u502 start` connects to Telegram with long polling through `teloxide`, logs every incoming message, and stores it in SQLite. Four long-running services run beside the connection: one ingests messages and answers the owner's commands, one transcribes audio and video from the chats the bot's owner approved through OpenRouter and queues the text, one delivers the queued replies, and one prunes rows older than the retention. The token comes from `TELEGRAM_API_TOKEN`, or from the file named by `TELEGRAM_API_TOKEN_FILE` when that is set.
 
 ## Prerequisites
 
 - Rust stable (edition 2024): install through rustup; `rust-toolchain.toml` pins the stable channel with the `rustfmt` and `clippy` components.
 - GNU Make: runs the canonical commands below.
 - A Telegram bot token from BotFather: required to run `cargo run -- start`; not needed for any `make` target.
-- An OpenRouter API key: required to run `cargo run -- start`, for the same reason. The numeric ids of the chats to transcribe are optional and can be collected from the logs after the bot starts.
+- An OpenRouter API key: required to run `cargo run -- start`, for the same reason.
+- The owner's Telegram user id: required to run `cargo run -- start`, since it is the only account that may approve a chat; it can be read from the logs after the bot starts.
 - universal-ctags (optional): required only for `make tags`.
 - Node and `npx` (optional): required only for `make format-docs`.
 - ffmpeg: required to transcribe video; installed in the runtime image and found through `PATH`. Audio is transcribed without it.
@@ -28,7 +29,7 @@ make lint         # cargo clippy --all-targets --all-features -- -D warnings
 make check        # lint + test
 make tags         # ctags index (requires universal-ctags)
 make format-docs  # prettier on all Markdown (requires Node/npx)
-TELEGRAM_API_TOKEN=... OPENROUTER_API_KEY=... TRANSCRIBE_CHATS=... DATABASE_PATH=... cargo run -- start
+TELEGRAM_API_TOKEN=... OPENROUTER_API_KEY=... OWNER_USER_ID=... DATABASE_PATH=... cargo run -- start
 ```
 
 Running `make` without a target executes `check`.
@@ -39,29 +40,31 @@ Running `make` without a target executes `check`.
 - `src/main.rs`: entry point; calls `cli::run()`.
 - `src/cli/mod.rs`: defines the clap `Command` enum, parses arguments, and routes each variant.
 - `src/cli/<command>.rs`: one module per subcommand; `src/cli/start.rs` composes the clients, the repositories, and the services.
-- `src/domains.rs`: declares the domain modules and `InsertOutcome`, the answer both idempotent inserts share.
+- `src/domains.rs`: declares the domain modules and `InsertOutcome`, the answer the idempotent inserts share.
 - `src/domains/attachment.rs`: the attachment model and the repository that owns the `attachments` SQL, including the pending scan and the processed flag.
+- `src/domains/chat.rs`: the chat registry and the repository that owns the `chats` SQL; every chat the bot receives a message from gets one row, recording never overwrites a status, and the approved set gates transcription.
 - `src/domains/message.rs`: the message model and the repository that owns the `messages` SQL and the one transaction that also writes a message's attachment.
 - `src/domains/outbox.rs`: the outbox model and the repository that owns the `outbox` SQL.
 - `src/infra.rs`: declares the infra modules.
-- `src/infra/config.rs`: `Settings`, `Whitelist`, `DEFAULT_TRANSCRIBE_MODEL`, and `DEFAULT_RETENTION_DAYS`; the only place the environment is read, one resolver gives every variable the same form: `<NAME>_FILE` first, then `<NAME>`, the value trimmed, blank meaning unset, UTF-8 only. One failure policy covers every field: absence is fatal only for the required values, absence of an optional value takes its default, and a present but unusable value fails startup.
+- `src/infra/config.rs`: `Settings`, `DEFAULT_TRANSCRIBE_MODEL`, and `DEFAULT_RETENTION_DAYS`; the only place the environment is read, one resolver gives every variable the same form: `<NAME>_FILE` first, then `<NAME>`, the value trimmed, blank meaning unset, UTF-8 only. `OWNER_USER_ID` is resolved here and must be a positive whole number. One failure policy covers every field: absence is fatal only for the required values, absence of an optional value takes its default, and a present but unusable value fails startup.
 - `src/infra/database.rs`: `Database` and `SCHEMA`; the async SQLite client, which opens a pool of connections and applies the embedded schema without knowing any table.
 - `src/infra/ffmpeg.rs`: `Ffmpeg`; the client for the `ffmpeg` program, which extracts a video's first audio track to Ogg/Opus under a timeout, kills the child on drop, and records its own call telemetry. The program is the `ffmpeg` on `PATH`.
 - `src/infra/openrouter.rs`: `OpenRouter` and `AudioFormat`; the Speech-to-Text client for audio transcription, built from the key and the model the composition root resolved, which records its own call telemetry. It refuses audio above its own 20 MB input cap and builds the request body by encoding the file in chunks straight into one preallocated buffer, so a request peaks at the body rather than at several copies of the input.
 - `src/infra/sentry.rs`: `init`, which takes the DSN as a value and installs the `tracing` subscriber, the optional Sentry client, an error layer, and a crate-scoped structured-log layer, and the metric functions for messages, attachments, the outbox, OpenRouter, and ffmpeg.
 - `src/infra/signal.rs`: `Signal` and `wait`; the listener for `SIGINT` and, on Unix, `SIGTERM`.
 - `src/infra/telegram_bot.rs`: `Telegram` and `Messages`, the Telegram client; it receives, downloads, reacts, and sends, and knows nothing about storage.
-- `src/services.rs`: declares the long-running services, the shutdown flag they share, the shared time helpers, the idle pause, and the batch and pruning bounds.
+- `src/services.rs`: declares the long-running services, the shutdown flag they share, the shared time helpers, the idle pause, the batch and pruning bounds, and the owner's command interface the ingestor calls.
 - `src/services/shutdown.rs`: `ShutdownTrigger`, the only side that can request shutdown, and `Shutdown`, the sticky cooperative flag every service clones and checks.
 - `src/services/wake.rs`: `WakeSender`, the only side that can pulse, and `WakeReceiver`, the only side that can wait out an idle pause.
-- `src/services/ingestor.rs`: the message loop; it stores every delivered message and its attachment metadata, drains what the dispatcher already queued, then stops polling.
-- `src/services/transcriber.rs`: the transcription loop for audio and video over the whitelist the composition root resolved; it processes an audio batch, then a video batch, and a video is downloaded and reduced with `ffmpeg` before it joins the audio flow.
+- `src/services/admin.rs`: the owner's direct-message interface; it changes the chat registry and answers inline, records nothing, queues nothing, and is called from the ingestor rather than being a loop of its own.
+- `src/services/ingestor.rs`: the message loop; it records the chat, stores every delivered message and its attachment metadata, answers the owner's commands, drains what the dispatcher already queued, then stops polling.
+- `src/services/transcriber.rs`: the transcription loop for audio and video over the approved chats the repository returns; it processes an audio batch, then a video batch, and a video is downloaded and reduced with `ffmpeg` before it joins the audio flow.
 - `src/services/outbox.rs`: the delivery loop; it sends queued replies and marks them sent.
 - `src/services/pruner.rs`: the hourly retention pass; it deletes delivered outbox rows, then attachments, then messages in bounded batches, in that order.
 - `src/shared.rs` / `src/shared/result.rs`: the crate-wide `Error` enum, with one variant per failure mode the bot can produce, and the `Result<T>` alias every fallible function returns; any layer may use them.
 - `src/shared/config.rs`: `VariableName`, the enum naming every environment variable, and `SentryDsn`, the destination or the reason reporting is off; resolution stays in `src/infra/config.rs`.
 - `src/shared/metrics.rs`: `MetricName`, the enum naming every application metric the bot records, with the exact Sentry wire name behind `as_str`; recording stays in `src/infra/sentry.rs`, which owns the client.
-- `src/shared/text.rs`: `truncate` and `MAX_ERROR_BODY`, the one policy for how much of an external error body reaches the logs; the OpenRouter and ffmpeg clients use it.
+- `src/shared/text.rs`: `truncate`, `MAX_ERROR_BODY`, `escape_html`, `chunks`, and `TELEGRAM_MESSAGE_LIMIT`, the crate's shared text policy: how much of an external error body reaches the logs, how Telegram HTML is escaped, and how text is split under Telegram's visible-character limit; the OpenRouter and ffmpeg clients, the transcriber, and the owner's interface use it.
 - `dev/schema.sql`: initial SQLite schema, embedded at build time and applied on every startup.
 
 Add every new subcommand as a variant of the `Command` enum in `src/cli/mod.rs`, route it from `run()`, and implement it in `src/cli/<command>.rs`.
@@ -109,7 +112,7 @@ docker run --rm u502_bot
 
 `compose.yaml` defines a single `bot` service. It builds from this checkout when given `--build`, and otherwise pulls the published image. `RUST_LOG` defaults to `info` and can be overridden through the environment.
 
-Compose reads the token from `.secrets/telegram_api_token`, the Sentry DSN from `.secrets/sentry_dsn`, and the OpenRouter key from `.secrets/openrouter_api_key`, so `docker compose up` fails immediately until the token and the key exist; `TRANSCRIBE_CHATS` is optional; see Secrets.
+Compose reads the token from `.secrets/telegram_api_token`, the Sentry DSN from `.secrets/sentry_dsn`, and the OpenRouter key from `.secrets/openrouter_api_key`, so `docker compose up` fails immediately until the token and the key exist; `OWNER_USER_ID` is required too; see Secrets.
 
 ```bash
 docker compose up --build      # build locally and run in the foreground
@@ -141,6 +144,7 @@ Architecture decisions live in `docs/adr/`, one Markdown file per decision, name
 - ADR 0014 records the decision to resolve configuration into a typed `Settings`.
 - ADR 0015 records the decision to bound transcription memory and keep filesystem calls off the async runtime.
 - ADR 0016 records the decision to bound the stored rows with a retention and a pruning service.
+- ADR 0017 records the decision to configure one owner who approves chats from a direct message.
 
 Run `make format-docs` after editing anything under `docs/`.
 
@@ -201,7 +205,7 @@ printf '%s' "$OPENROUTER_API_KEY" > .secrets/openrouter_api_key
 chmod 600 .secrets/openrouter_api_key
 ```
 
-`TRANSCRIBE_CHATS` is ordinary configuration with the same file form as everything else: a comma-separated list of numeric chat ids, optional, where empty means "transcribe nothing" and every audio and video attachment is skipped and marked processed. The skip warning carries the chat id, so an operator starts with an empty list, reads the ids from the logs, and adds them. A non-numeric entry still fails startup. `TRANSCRIBE_MODEL_NAME` is optional too; when it is unset or empty the compiled-in default `google/gemini-3.5-transcribe` is used, and startup logs `Using model <id> to transcribe; override with TRANSCRIBE_MODEL_NAME` so the model in use is visible. A configured value that cannot be read, such as a broken `TRANSCRIBE_MODEL_NAME_FILE`, fails startup instead of falling back: only absence or blank takes a default.
+`OWNER_USER_ID` is required and is the one setting that is not a secret: a numeric user id reveals nothing, so it stays in the environment where Compose passes it through, even though it resolves with the same `<NAME>_FILE` form as every other variable. It must be a positive whole number; a missing, blank, non-numeric, zero, or negative value fails startup. Telegram reports a private chat's id as the user's own id, so the owner reads theirs from the log of a message they send the bot, and an id bot such as `@userinfobot` shows it too; they must have messaged the bot once before it can send them a notice. `TRANSCRIBE_CHATS` is gone and a stale value is ignored: every chat in an existing database starts pending, so an upgrade needs one approval per chat. `TRANSCRIBE_MODEL_NAME` is optional; when it is unset or empty the compiled-in default `google/gemini-3.5-transcribe` is used, and startup logs `Using model <id> to transcribe; override with TRANSCRIBE_MODEL_NAME` so the model in use is visible. A configured value that cannot be read, such as a broken `TRANSCRIBE_MODEL_NAME_FILE`, fails startup instead of falling back: only absence or blank takes a default.
 
 `RETENTION_DAYS` is optional with the same file form: a whole number of days of rows to keep, defaulting to 30 when it is unset or blank, and `0` disabling pruning so every row is kept. Startup logs the effective retention and how to disable it. A value that is present but not a non-negative whole number fails startup instead of falling back to the default, like any other unusable optional value.
 
@@ -209,13 +213,15 @@ chmod 600 .secrets/openrouter_api_key
 
 Messages live in a local SQLite database. The schema is embedded at build time with `include_str!` from `dev/schema.sql` and applied on every startup, so there is no schema path or environment variable to configure. The database is opened asynchronously at startup and accessed through the message repository in `src/domains/message.rs`, the attachment repository in `src/domains/attachment.rs`, and the outbox repository in `src/domains/outbox.rs`. The database path comes from `DATABASE_PATH`, read once into the settings with the same `<NAME>_FILE` form as every other variable, and it remains required, so a missing value fails startup; Compose sets it to `/opt/data/database.sqlite`. The ingestor writes every delivered message to `messages` and, when the message carries audio or video, one row to `attachments` in the same transaction: an attachment the database rejects rolls the message back too, so no attachment row can be written without its message. Both tables are unique by `(chat_id, message_id)`, so a redelivery is skipped. The attachment row, keyed by the same pair, holds the Telegram `file_id`, the MIME type, the duration, the size, and a `transcribed` flag that means processed: transcribed or deliberately skipped. The transcriber scans that flag, reading audio and video rows whose message is at most an hour old, so the age of the message bounds both cost and retries; a partial index serves the pending scan. Outgoing replies live in `outbox`, one row per Telegram message, holding the chat, the message id to answer when there is one, the queue time, the delivery time, and the text. `sent_at` stays NULL until Telegram accepts a row, and a partial index serves the pending scan. WAL lets a pending scan read while the ingestor writes, over a pool of up to four connections. The pruner deletes rows no service can read again: delivered outbox rows whose `sent_at` is older than `RETENTION_DAYS`, then attachments whose message is missing or older than the retention, then messages older than the retention. It runs once at startup and then once an hour, deleting at most 500 rows per statement and 20 statements per table per pass, and it does not consult the attachment's `transcribed` flag, because past the transcriber's one-hour window an unprocessed row can never be attempted. Two additive indexes, `messages_received_at` and the partial `outbox_sent`, serve the age scans. Deletion bounds growth but does not shrink the file: SQLite keeps the freed pages, and reclaiming them is an operator's `VACUUM` run with the bot stopped.
 
+A `chats` table records every chat the bot has received a message from: the chat id, the kind Telegram reported, the title, a status of `pending`, `approved`, or `blocked`, and the first and last observation times. Recording a chat inserts it pending and afterwards refreshes only the kind, the title, and the last-seen time, so no later activity overwrites the owner's decision; an unreadable status reads back as pending. The pruner leaves `chats` alone, because one row per chat ever seen stays tiny and the owner's decisions must not age out.
+
 ## Observability
 
 Sentry receives every `ERROR`-level `tracing` event and every panic as an issue, and every `INFO`-or-higher event from this crate as a structured log; events from dependencies become issues but not logs. `RUST_LOG` controls console output only. The ingestor records the application counter `telegram.messages.received` once per incoming Telegram message and `telegram.messages.stored` once per committed transaction, so the gap between them is the number of messages whose transaction was rolled back. It records `telegram.attachments.audio` and `telegram.attachments.video` once per received attachment of that family, and `telegram.attachments.stored` once per committed transaction, so the gap between them is the number of attachments whose transaction was rolled back. A duplicate delivery counts in both `stored` counters, because its row is already durable.
 
 The transcriber records `telegram.attachments.transcribed` once per attachment it finishes with, whether transcribed, silent, or skipped, and `outbox.messages.added` once per queued chunk. The outbox service records `outbox.messages.sent` once per row Telegram accepted, so the gap between added and sent is the number of replies not yet delivered; it also records `transcription.reply.latency`, in seconds, for every first reply chunk, from the Telegram send time of the source message to the moment Telegram accepts the reply. The pruner records `telegram.messages.pruned`, `telegram.attachments.pruned`, and `outbox.messages.pruned`, one increment per deleted row, and a statement that deletes nothing records nothing. The OpenRouter client records `openrouter.calls` and `openrouter.duration` for every call, successful or not, and `openrouter.tokens.input`, `openrouter.tokens.output`, and `openrouter.cost_micro_usd` from the usage OpenRouter reports; cost is in micro-USD. The ffmpeg client records `ffmpeg.calls` and `ffmpeg.duration` for every extraction, successful or timed out, so the video path is visible even when it never reaches the model. Startup logs `Using model <id> to transcribe; override with TRANSCRIBE_MODEL_NAME` once, so the model that spends the credits is visible both in the console and in Sentry's structured logs.
 
-The reported logs include message text, transcripts, chat ids, sender names, file ids, MIME types, and file names. `send_default_pii` stays off, so the SDK adds no automatic enrichment, and no metric carries attributes. The DSN, the bot token, and the OpenRouter key are never logged. Without a DSN the integration is disabled and the bot logs a single warning; see Secrets.
+The reported logs include message text, transcripts, chat ids, chat titles, sender names, file ids, MIME types, and file names. `send_default_pii` stays off, so the SDK adds no automatic enrichment, and no metric carries attributes. The DSN, the bot token, and the OpenRouter key are never logged. Without a DSN the integration is disabled and the bot logs a single warning; see Secrets.
 
 ## Out of scope
 

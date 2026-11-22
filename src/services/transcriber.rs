@@ -12,14 +12,16 @@
 //! The one-hour window bounds both cost and retries: a file that keeps failing is retried on every
 //! scan until its message ages out, and then left alone. A failure a retry could not change — a
 //! video with no audio track, a host without ffmpeg, or audio above the client's input limit — is
-//! skipped and marked processed instead. The whitelist the composition root resolved
-//! limits which chats are transcribed at all, because a transcription spends credits and sends audio
-//! to a third party. An empty one transcribes nothing and the skip warnings publish the chat ids an
-//! operator needs before the list is known.
+//! skipped and marked processed instead. Only the chats the owner approved are transcribed, because
+//! a transcription spends credits and sends audio to a third party: the approved set is read once per
+//! tick, a failed read is logged and retried on the next tick, and an unapproved chat is skipped and
+//! marked processed.
+
+use std::collections::HashSet;
 
 use crate::domains::attachment::{AttachmentKind, AttachmentRepository, PendingAttachment};
+use crate::domains::chat::ChatRepository;
 use crate::domains::outbox::{EnqueueOutcome, NewOutboxMessage, OutboxRepository};
-use crate::infra::config::Whitelist;
 use crate::infra::ffmpeg::Ffmpeg;
 use crate::infra::openrouter::{AudioFormat, OpenRouter};
 use crate::infra::sentry;
@@ -28,6 +30,7 @@ use crate::services::shutdown::Shutdown;
 use crate::services::wake::{WakeReceiver, WakeSender};
 use crate::services::{BATCH, IDLE, unix_now};
 use crate::shared::result::{Error, Result};
+use crate::shared::text::{TELEGRAM_MESSAGE_LIMIT, chunks, escape_html};
 
 /// Plain-text header placed above the transcript in the first reply.
 const REPLY_HEADER: &str = "Расшифровка:";
@@ -45,13 +48,6 @@ const MAX_DOWNLOAD_BYTES: i64 = 20 * 1024 * 1024;
 /// tell a queued attachment from one the bot never saw.
 const PROCESSING_REACTION: &str = "👀";
 
-/// Maximum visible characters per outbox row: Telegram rejects a message longer than 4096.
-///
-/// The limit budgets the text Telegram counts after entity parsing, not the markup, so chunking
-/// stays on the raw transcript and escaping is applied per chunk, where a chunk boundary can never
-/// split a tag.
-const CHUNK_LIMIT: usize = 4_000;
-
 /// Transcribes pending audio and video attachments and queues the transcripts for delivery.
 pub struct Transcriber {
     telegram: Telegram,
@@ -59,15 +55,15 @@ pub struct Transcriber {
     ffmpeg: Ffmpeg,
     attachments: AttachmentRepository,
     outbox: OutboxRepository,
-    chats: Whitelist,
+    chats: ChatRepository,
     pending_attachments: WakeReceiver,
     pending_replies: WakeSender,
 }
 
 impl Transcriber {
     /// Creates the service over the clients and repositories the command composed.
-    // One parameter per client, repository, whitelist, and wake edge: the wiring is the whole
-    // constructor, so grouping the inputs would only hide it.
+    // One parameter per client, repository, and wake edge: the wiring is the whole constructor, so
+    // grouping the inputs would only hide it.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         telegram: Telegram,
@@ -75,7 +71,7 @@ impl Transcriber {
         ffmpeg: Ffmpeg,
         attachments: AttachmentRepository,
         outbox: OutboxRepository,
-        chats: Whitelist,
+        chats: ChatRepository,
         pending_attachments: WakeReceiver,
         pending_replies: WakeSender,
     ) -> Self {
@@ -118,6 +114,17 @@ impl Transcriber {
     /// read is retried once per [`IDLE`] instead of as fast as the failure returns.
     async fn tick(&self, shutdown: &mut Shutdown) -> bool {
         let now = unix_now();
+        let approved = match self.chats.approved().await {
+            Ok(approved) => approved,
+            Err(error) => {
+                tracing::error!(
+                    error = &error as &dyn std::error::Error,
+                    "Failed to read the approved chats"
+                );
+
+                return false;
+            }
+        };
         let mut processed = false;
 
         for kind in [AttachmentKind::Audio, AttachmentKind::Video] {
@@ -125,14 +132,20 @@ impl Transcriber {
                 break;
             }
 
-            processed |= self.scan(kind, now, shutdown).await;
+            processed |= self.scan(kind, &approved, now, shutdown).await;
         }
 
         processed
     }
 
     /// Scans one kind and processes its batch; returns whether any attachment was finished.
-    async fn scan(&self, kind: AttachmentKind, now: i64, shutdown: &mut Shutdown) -> bool {
+    async fn scan(
+        &self,
+        kind: AttachmentKind,
+        approved: &HashSet<i64>,
+        now: i64,
+        shutdown: &mut Shutdown,
+    ) -> bool {
         let pending = match self
             .attachments
             .pending(kind, now - WINDOW_SECONDS, BATCH)
@@ -161,7 +174,7 @@ impl Transcriber {
                 break;
             }
 
-            processed |= self.process(attachment, now, shutdown).await;
+            processed |= self.process(attachment, approved, now, shutdown).await;
         }
 
         processed
@@ -176,14 +189,16 @@ impl Transcriber {
     async fn process(
         &self,
         attachment: PendingAttachment,
+        approved: &HashSet<i64>,
         now: i64,
         shutdown: &mut Shutdown,
     ) -> bool {
-        if !self.chats.contains(attachment.chat_id) {
+        if !approved.contains(&attachment.chat_id) {
             tracing::warn!(
                 chat_id = attachment.chat_id,
                 kind = attachment.kind.as_str(),
-                "Attachment from chat {} skipped: not a white listed chat, add to TRANSCRIBE_CHATS if needed.",
+                "Attachment from chat {} skipped: the chat is not approved, use /approve {} from the owner's direct messages.",
+                attachment.chat_id,
                 attachment.chat_id
             );
 
@@ -519,16 +534,6 @@ fn log_failure(attachment: &PendingAttachment, error: &(dyn std::error::Error + 
     );
 }
 
-/// Escapes the characters Telegram's HTML parse mode treats as markup.
-///
-/// The ampersand is replaced first, so the entities introduced by the later replacements are not
-/// escaped twice. Everything else is left untouched.
-fn escape_html(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
 /// Renders one chunk as Telegram HTML: the header above the transcript, the transcript quoted.
 ///
 /// Only the first chunk carries [`REPLY_HEADER`]; the rest are the bare blockquote. The transcript
@@ -546,7 +551,7 @@ fn reply_html(chunk: &str, first: bool) -> String {
 
 /// Renders a transcript as outbox rows, answering only the first chunk so the thread stays on it.
 fn replies(attachment: &PendingAttachment, transcript: &str, now: i64) -> Vec<NewOutboxMessage> {
-    chunks(transcript, CHUNK_LIMIT)
+    chunks(transcript, TELEGRAM_MESSAGE_LIMIT)
         .into_iter()
         .enumerate()
         .map(|(index, chunk)| NewOutboxMessage {
@@ -558,30 +563,6 @@ fn replies(attachment: &PendingAttachment, transcript: &str, now: i64) -> Vec<Ne
         .collect()
 }
 
-/// Splits `text` into pieces of at most `limit` bytes without cutting a character in half.
-fn chunks(text: &str, limit: usize) -> Vec<&str> {
-    let mut chunks = Vec::new();
-    let mut start = 0;
-
-    while start < text.len() {
-        let mut end = (start + limit).min(text.len());
-
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-
-        // A limit smaller than the next character still has to make progress.
-        if end == start {
-            end = start + text[start..].chars().next().map_or(0, char::len_utf8);
-        }
-
-        chunks.push(&text[start..end]);
-        start = end;
-    }
-
-    chunks
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -589,19 +570,6 @@ mod tests {
     #[test]
     fn the_download_cap_is_the_bot_api_limit() {
         assert_eq!(MAX_DOWNLOAD_BYTES, 20 * 1024 * 1024);
-    }
-
-    #[test]
-    fn escape_html_escapes_markup_characters() {
-        assert_eq!(escape_html("&"), "&amp;");
-        assert_eq!(escape_html("<"), "&lt;");
-        assert_eq!(escape_html(">"), "&gt;");
-    }
-
-    #[test]
-    fn escape_html_escapes_the_ampersand_first() {
-        assert_eq!(escape_html("a & b < c > d"), "a &amp; b &lt; c &gt; d");
-        assert_eq!(escape_html("&lt;"), "&amp;lt;");
     }
 
     #[test]
@@ -656,7 +624,7 @@ mod tests {
     #[test]
     fn replies_renders_one_header_for_a_long_transcript() {
         let attachment = pending_attachment();
-        let transcript = "x".repeat(CHUNK_LIMIT + 1);
+        let transcript = "x".repeat(TELEGRAM_MESSAGE_LIMIT + 1);
 
         let messages = replies(&attachment, &transcript, 1_700_000_000);
 
@@ -675,42 +643,5 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert!(messages[0].message.contains("&lt;b&gt;"));
-    }
-
-    #[test]
-    fn chunks_splits_ascii_text_at_the_limit() {
-        assert_eq!(chunks("abcdef", 2), vec!["ab", "cd", "ef"]);
-    }
-
-    #[test]
-    fn chunks_keeps_text_within_the_limit_in_one_piece() {
-        assert_eq!(chunks("abcde", 5), vec!["abcde"]);
-        assert_eq!(chunks("abc", 5), vec!["abc"]);
-    }
-
-    #[test]
-    fn chunks_returns_nothing_for_empty_text() {
-        assert!(chunks("", 5).is_empty());
-    }
-
-    #[test]
-    fn chunks_never_splits_a_multibyte_character() {
-        let text = "привет".repeat(2);
-
-        let chunks = chunks(&text, 5);
-
-        assert_eq!(chunks.concat(), text);
-        for chunk in &chunks {
-            assert!(!chunk.is_empty(), "a chunk must make progress");
-            assert!(chunk.len() <= 5, "chunk {chunk:?} exceeds the limit");
-        }
-    }
-
-    #[test]
-    fn chunks_progress_even_below_one_character() {
-        let chunks = chunks("привет", 1);
-
-        assert_eq!(chunks.concat(), "привет");
-        assert_eq!(chunks.len(), 6);
     }
 }

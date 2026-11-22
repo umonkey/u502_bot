@@ -7,6 +7,7 @@ One local SQLite database holds everything the bot keeps. There is no external d
 - messages: every message Telegram delivers, with its text or caption
 - attachments: one row per audio or video message, holding the Telegram `file_id`, the MIME type, the duration, the size, and a `transcribed` flag
 - outbox: one row per queued reply, holding the chat, the message it answers when there is one, the queue time, the delivery time, and the text
+- chats: one row per chat the bot has received a message from, holding its status and when it was first and last seen
 
 ## Duplicates
 
@@ -23,6 +24,12 @@ The `transcribed` flag means processed: transcribed, silent, or deliberately ski
 ## Outbox
 
 `sent_at` stays NULL until Telegram accepts a row, so a restart resends whatever was queued but not delivered. Delivery is at-least-once; see [communication](../communication/README.md).
+
+## Chat registry
+
+`chats` holds one row per chat the bot has received a message from: the chat id, the kind Telegram reported, the title, a status of `pending`, `approved`, or `blocked`, and the first and last observation times. A new chat starts `pending`, and later messages refresh only the kind, the title, and the last-seen time, so neither an approval nor a block is overwritten by activity. A status the bot does not recognise reads back as pending, so a hand-edited row fails closed. See [access](../access/README.md).
+
+Retention leaves this table alone. It holds one row per chat ever seen, so it stays tiny, and the owner's decisions are operator state that must not age out.
 
 ## Concurrency
 

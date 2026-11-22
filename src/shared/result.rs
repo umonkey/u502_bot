@@ -60,8 +60,8 @@ pub enum Error {
     ReadConfiguration { path: PathBuf, source: io::Error },
     /// A configured value that must not be blank is blank.
     EmptyConfiguration(VariableName),
-    /// One `TRANSCRIBE_CHATS` entry is not a numeric chat id.
-    InvalidChatId(String),
+    /// `OWNER_USER_ID` is not a positive whole number.
+    InvalidOwnerUserId(String),
     /// `RETENTION_DAYS` is not a non-negative whole number of days.
     InvalidRetentionDays(String),
 
@@ -122,10 +122,10 @@ impl fmt::Display for Error {
             Self::EmptyConfiguration(name) => {
                 write!(formatter, "{name} is empty or only whitespace")
             }
-            Self::InvalidChatId(token) => write!(
+            Self::InvalidOwnerUserId(value) => write!(
                 formatter,
-                "{} entry {token:?} is not a numeric chat id",
-                VariableName::TranscribeChats
+                "{} entry {value:?} is not a positive numeric user id",
+                VariableName::OwnerUserId
             ),
             Self::InvalidRetentionDays(value) => write!(
                 formatter,
@@ -200,7 +200,7 @@ impl std::error::Error for Error {
             Self::MissingVariable(_)
             | Self::VariableNotUnicode(_)
             | Self::EmptyConfiguration(_)
-            | Self::InvalidChatId(_)
+            | Self::InvalidOwnerUserId(_)
             | Self::InvalidRetentionDays(_)
             | Self::MessageIdOutOfRange(_)
             | Self::HttpStatus { .. }
@@ -229,12 +229,12 @@ mod tests {
     }
 
     #[test]
-    fn invalid_chat_id_names_the_variable() {
-        let error = Error::InvalidChatId("not-a-number".to_owned());
+    fn invalid_owner_user_id_names_the_variable() {
+        let error = Error::InvalidOwnerUserId("not-a-number".to_owned());
 
         assert_eq!(
             error.to_string(),
-            "TRANSCRIBE_CHATS entry \"not-a-number\" is not a numeric chat id"
+            "OWNER_USER_ID entry \"not-a-number\" is not a positive numeric user id"
         );
     }
 

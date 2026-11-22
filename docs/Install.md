@@ -7,6 +7,7 @@ u502 Bot runs as a single Docker image. `supervisord` is PID 1: it supervises `c
 - Docker with the Compose plugin
 - A Telegram bot token from [BotFather](https://t.me/BotFather), created with `/newbot`
 - An OpenRouter API key, required for transcription
+- The Telegram user id of the bot's owner, required: it is the only account that may approve a chat for transcription
 - A Sentry DSN, optional: without one the bot runs and reports nothing
 
 A bot that joins a group also needs its privacy mode changed; see [communication](features/communication/README.md). The DSN is covered in [observability](features/observability/README.md).
@@ -25,6 +26,8 @@ chmod 600 .secrets/*
 
 Leave `.secrets/sentry_dsn` empty to disable reporting. `.secrets/` is both git-ignored and docker-ignored: never commit it and never copy it into an image.
 
+The owner id is not a secret, so it has no file under `.secrets/`: Compose passes `OWNER_USER_ID` through from the host environment or `.env`, and an empty value counts as missing, so `docker compose up` fails until it is set.
+
 ## Run
 
 `docker compose up --build` builds from this checkout and runs in the foreground. `docker compose pull` fetches the published image instead, and `docker compose up -d` starts it detached. CI publishes `ghcr.io/umonkey/u502_bot:latest` on every push to `master`, so Compose pulls it unless `--build` is given.
@@ -36,10 +39,15 @@ Two repository shortcuts wrap the same commands: `make start` runs the bot in a 
 - the token, the Sentry DSN, and the OpenRouter key through `TELEGRAM_API_TOKEN_FILE`, `SENTRY_DSN_FILE`, and `OPENROUTER_API_KEY_FILE`, each mounted from `.secrets/` at `/run/secrets/`
 - `DATABASE_PATH=/opt/data/database.sqlite`
 - `RUST_LOG`, defaulting to `info`
-- `TRANSCRIBE_CHATS` and `TRANSCRIBE_MODEL_NAME`, passed through from the host environment or `.env` and empty when unset, which means "transcribe nothing" and "use the built-in model"
+- `OWNER_USER_ID`, required and passed through from the host environment or `.env`; an empty value fails startup
+- `TRANSCRIBE_MODEL_NAME`, passed through from the host environment or `.env` and empty when unset, which means "use the built-in model"
 - `RETENTION_DAYS`, passed through the same way and empty when unset, which keeps the built-in 30 days; `0` keeps every row instead of pruning
 
-What each variable means, how its `_FILE` form resolves, and which ones are required is in [configuration](features/configuration/README.md). The chat list is in [access](features/access/README.md).
+What each variable means, how its `_FILE` form resolves, and which ones are required is in [configuration](features/configuration/README.md). The owner id and the chat approvals are in [access](features/access/README.md).
+
+## Finding your user id
+
+Telegram reports a private chat's id as the user's own id, so the owner can read their id from the log line of any message they send the bot. An id bot such as [`@userinfobot`](https://t.me/userinfobot) reports it without a log line. The owner has to write to the bot once before it can send them a notice or an answer, because a bot cannot open a conversation.
 
 ## Data
 

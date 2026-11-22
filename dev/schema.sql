@@ -42,3 +42,13 @@ CREATE INDEX IF NOT EXISTS messages_received_at ON messages (received_at);
 
 -- Serves the outbox prune.
 CREATE INDEX IF NOT EXISTS outbox_sent ON outbox (sent_at) WHERE sent_at IS NOT NULL;
+
+-- One row per chat the bot has observed; the owner's status gates transcription.
+CREATE TABLE IF NOT EXISTS chats (
+    chat_id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL,                      -- 'private', 'group', 'supergroup', or 'channel'
+    title TEXT,                              -- absent for a private chat
+    status TEXT NOT NULL DEFAULT 'pending',  -- 'pending', 'approved', or 'blocked'
+    added_at INTEGER NOT NULL,               -- Unix time in seconds, UTC
+    seen_at INTEGER NOT NULL                 -- Unix time in seconds, UTC
+);

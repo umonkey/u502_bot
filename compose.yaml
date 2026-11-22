@@ -13,8 +13,8 @@ services:
       OPENROUTER_API_KEY_FILE: /run/secrets/openrouter_api_key
       # Empty means "use the built-in default"; a host or .env value still overrides it.
       TRANSCRIBE_MODEL_NAME: ${TRANSCRIBE_MODEL_NAME:-}
-      # Optional: empty transcribes nothing and logs the chat ids it sees; list them to enable audio.
-      TRANSCRIBE_CHATS: ${TRANSCRIBE_CHATS:-}
+      # Required: the Telegram user id of the bot's owner, e.g. 123456789.
+      OWNER_USER_ID: ${OWNER_USER_ID:-}
       # Optional: unset keeps the built-in 30 days, 0 keeps every row.
       RETENTION_DAYS: ${RETENTION_DAYS:-}
       DATABASE_PATH: /opt/data/database.sqlite

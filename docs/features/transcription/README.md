@@ -1,6 +1,6 @@
 # Transcription
 
-The bot transcribes audio and video from the chats allowed by `TRANSCRIBE_CHATS`, using OpenRouter's Speech-to-Text API, and queues the transcript as a reply to the source message. Transcription runs beside ingestion, so a slow download or model call never holds up storage.
+The bot transcribes audio and video from the chats the owner approved, using OpenRouter's Speech-to-Text API, and queues the transcript as a reply to the source message. Transcription runs beside ingestion, so a slow download or model call never holds up storage.
 
 ## Audio
 
@@ -22,6 +22,7 @@ The bot sets the 👀 reaction on a message when it begins transcribing its audi
 
 Some attachments are marked processed without a transcript, because a retry could not change the outcome:
 
+- a chat the owner has not approved
 - files above the Bot API download ceiling of 20 MB
 - audio above the 20 MB transcription input limit, which is the Bot API download ceiling and therefore only reachable for the audio extracted from a long video
 - videos with no audio track
@@ -31,6 +32,8 @@ Some attachments are marked processed without a transcript, because a retry coul
 ## Retries
 
 A download or model failure is retried on every scan while the source message is at most an hour old. The one-hour window bounds both the cost of a failing attachment and the number of retries; an attachment that ages out is never transcribed later.
+
+An attachment from a chat the owner had not approved is marked processed when it is first seen, so approving the chat later transcribes only what arrives afterwards.
 
 Queueing the replies and marking the attachment processed are one transaction. A crash or a rejected statement before the commit leaves the attachment pending and queues nothing, so the retry starts from scratch instead of delivering a chunk twice. An attachment another writer already completed is skipped rather than queued again.
 
@@ -50,9 +53,9 @@ Speech-to-Text models are a separate catalogue from the chat models, so an overr
 
 The bot declares Ogg on the wire because a Telegram voice note already carries Ogg/Opus and the video extractor produces Ogg as well. Ogg is not universal, and OpenRouter does not report per-format support, so a provider that rejects it answers with HTTP 400 and the attachment is retried until it ages out of the window. Moving to a model that accepts only mp3 or wav means changing both the format the video is extracted to and the format the bot declares, in code.
 
-## Keys and allow-list
+## Keys and approved chats
 
-`OPENROUTER_API_KEY` is required; see [configuration](../configuration/README.md). Which chats are transcribed is decided by `TRANSCRIBE_CHATS`; see [access](../access/README.md). What is stored about each attachment is in [storage](../storage/README.md), and replies are delivered by the outbox described in [communication](../communication/README.md).
+`OPENROUTER_API_KEY` is required; see [configuration](../configuration/README.md). Which chats are transcribed is the owner's decision; see [access](../access/README.md). What is stored about each attachment is in [storage](../storage/README.md), and replies are delivered by the outbox described in [communication](../communication/README.md).
 
 ## Further reading
 

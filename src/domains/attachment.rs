@@ -161,7 +161,7 @@ impl AttachmentRepository {
     /// Marks one attachment processed, so it leaves [`Self::pending`] for good.
     ///
     /// `transcribed` means "processed: transcribed or deliberately skipped", not "has a transcript":
-    /// a row whose chat is not white-listed is marked here too, because leaving it pending would
+    /// a row whose chat is not approved is marked here too, because leaving it pending would
     /// repeat the same skip on every scan for the length of the window. This form is for an
     /// attachment finished without a reply; the transcript path marks it inside its transaction.
     pub async fn mark_transcribed(&self, id: i64) -> Result<()> {

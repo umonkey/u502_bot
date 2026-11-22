@@ -19,8 +19,8 @@ pub enum VariableName {
     OpenRouterApiKey,
     /// `DATABASE_PATH`: the path of the SQLite database file; required.
     DatabasePath,
-    /// `TRANSCRIBE_CHATS`: the comma-separated chat ids to transcribe; optional.
-    TranscribeChats,
+    /// `OWNER_USER_ID`: the Telegram user id that may manage the chat registry; required.
+    OwnerUserId,
     /// `TRANSCRIBE_MODEL_NAME`: the transcription model; optional, with a compiled-in default.
     TranscribeModelName,
     /// `RETENTION_DAYS`: how many days of rows to keep; optional, `0` keeps every row, unset keeps 30 days.
@@ -43,7 +43,7 @@ impl VariableName {
             Self::SentryDsn => "SENTRY_DSN",
             Self::OpenRouterApiKey => "OPENROUTER_API_KEY",
             Self::DatabasePath => "DATABASE_PATH",
-            Self::TranscribeChats => "TRANSCRIBE_CHATS",
+            Self::OwnerUserId => "OWNER_USER_ID",
             Self::TranscribeModelName => "TRANSCRIBE_MODEL_NAME",
             Self::RetentionDays => "RETENTION_DAYS",
         }
@@ -56,7 +56,7 @@ impl VariableName {
             Self::SentryDsn => "SENTRY_DSN_FILE",
             Self::OpenRouterApiKey => "OPENROUTER_API_KEY_FILE",
             Self::DatabasePath => "DATABASE_PATH_FILE",
-            Self::TranscribeChats => "TRANSCRIBE_CHATS_FILE",
+            Self::OwnerUserId => "OWNER_USER_ID_FILE",
             Self::TranscribeModelName => "TRANSCRIBE_MODEL_NAME_FILE",
             Self::RetentionDays => "RETENTION_DAYS_FILE",
         }
@@ -82,7 +82,7 @@ mod tests {
             (VariableName::SentryDsn, "SENTRY_DSN"),
             (VariableName::OpenRouterApiKey, "OPENROUTER_API_KEY"),
             (VariableName::DatabasePath, "DATABASE_PATH"),
-            (VariableName::TranscribeChats, "TRANSCRIBE_CHATS"),
+            (VariableName::OwnerUserId, "OWNER_USER_ID"),
             (VariableName::TranscribeModelName, "TRANSCRIBE_MODEL_NAME"),
             (VariableName::RetentionDays, "RETENTION_DAYS"),
         ];
@@ -107,7 +107,7 @@ mod tests {
             VariableName::SentryDsn,
             VariableName::OpenRouterApiKey,
             VariableName::DatabasePath,
-            VariableName::TranscribeChats,
+            VariableName::OwnerUserId,
             VariableName::TranscribeModelName,
             VariableName::RetentionDays,
         ];

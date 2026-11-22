@@ -5,6 +5,7 @@
 //! `outbox::Outbox` delivers queued replies, and `pruner::Pruner` deletes rows older than the
 //! retention. Each one holds handles to clients and repositories but owns neither: the clients live
 //! in `src/infra/`, the SQL lives in `src/domains/`, and the composition lives in `src/cli/`.
+//! `admin::Admin` is not a loop: it is the owner's command interface, which the ingestor calls.
 //!
 //! The module also carries two one-way edges. [`shutdown`] carries the [`shutdown::ShutdownTrigger`]
 //! the command holds and the [`shutdown::Shutdown`] side each loop clones, so a command can ask
@@ -14,6 +15,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+pub mod admin;
 pub mod ingestor;
 pub mod outbox;
 pub mod pruner;
