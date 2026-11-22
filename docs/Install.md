@@ -1,6 +1,6 @@
 # Installation
 
-u502 Bot runs as a single Docker image. `supervisord` is PID 1: it supervises `cron -f` as root and the bot as the unprivileged `u502` user. The runtime image ships `ffmpeg` for video transcription and the `sqlite3` CLI for inspecting the database. No ports are published, because updates arrive by long polling, so there is no webhook, public URL, or ingress to set up.
+u502 Bot runs as a single Docker image. `supervisord` is PID 1: it supervises `cron -f` as root and the bot as the unprivileged `u502` user. The runtime image ships `ffmpeg` for video transcription, the `sqlite3` CLI for inspecting the database, and the `tzdata` zone database so `export` can resolve names such as `Europe/Moscow`. No ports are published, because updates arrive by long polling, so there is no webhook, public URL, or ingress to set up.
 
 ## Prerequisites
 
@@ -51,7 +51,10 @@ The `u502_data` named volume holds `/opt/data`, so replacing or rebuilding the c
 docker compose logs -f bot                    # follow the logs
 docker compose down                           # stop the bot
 docker compose pull && docker compose up -d   # update to the published image
+docker compose run --rm -e TZ=Europe/Moscow bot u502 export --out /opt/data/export
 ```
+
+The export command writes one Markdown file per chat for one local day; `--out` must be writable by the bot user, so the `u502_data` volume is the convenient destination. See [export](features/export/README.md).
 
 ## Shutdown
 

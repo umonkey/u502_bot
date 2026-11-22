@@ -48,9 +48,14 @@ Two indexes serve the age scans: `messages_received_at` and the partial `outbox_
 
 Deletion bounds growth but does not shrink the file: SQLite keeps the freed pages. Reclaiming disk space is an operator's `VACUUM`, run with the bot stopped.
 
+## Export
+
+The `export` command reads a day of stored messages and writes one Markdown file per chat. It scans `messages` by `received_at` over the half-open local-day range, so the `messages_received_at` index serves it, and it skips rows without text. It issues only reads, never applies the schema, and fails when the database file is missing instead of creating it, so a wrong path is visible. The file layout and the format are in [export](../export/README.md).
+
 ## Further reading
 
 - [ADR 0005: keep received messages in a local database](../../adr/0005-local-sqlite-storage.md)
 - [ADR 0006: record attachment metadata for later processing](../../adr/0006-attachment-storage.md)
 - [ADR 0008: queue outgoing replies in an outbox](../../adr/0008-outbox-queue.md)
 - [ADR 0016: bound the stored rows with a retention and a pruning service](../../adr/0016-retention-and-pruning.md)
+- [ADR 0017: export one local day of a chat to Markdown](../../adr/0017-export-chat-day.md)

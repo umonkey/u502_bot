@@ -6,20 +6,23 @@ Every setting comes from the environment; there is no config-file format and no 
 
 Each variable resolves the same way: `<NAME>_FILE` is consulted first, and its contents win over a direct `<NAME>`. The file is decoded as UTF-8, the resolved value is trimmed of surrounding whitespace, and a value that is blank after trimming counts as unset. So `OPENROUTER_API_KEY_FILE=/run/secrets/openrouter_api_key` and `OPENROUTER_API_KEY=...` both work, and the file wins when both are set.
 
-`RUST_LOG` is the one exception: the logging filter reads it directly, it has no `_FILE` form, and it affects console output only. See [observability](../observability/README.md).
+`RUST_LOG` and `TZ` are the exceptions, and neither has a `_FILE` form: the logging filter reads `RUST_LOG` directly and it affects console output only, while the date library reads `TZ` for `export`. See [observability](../observability/README.md) and [export](../export/README.md).
 
 ## Variables
 
-| Variable                | Required | Default                          | Purpose                                                                                                                 |
-| ----------------------- | -------- | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `TELEGRAM_API_TOKEN`    | yes      | none                             | BotFather token; see [communication](../communication/README.md)                                                        |
-| `OPENROUTER_API_KEY`    | yes      | none                             | OpenRouter key for Speech-to-Text; see [transcription](../transcription/README.md)                                      |
-| `DATABASE_PATH`         | yes      | none                             | SQLite file; Compose uses `/opt/data/database.sqlite`; see [storage](../storage/README.md)                              |
-| `SENTRY_DSN`            | no       | unset                            | error and log reporting; blank disables it; see [observability](../observability/README.md)                             |
-| `TRANSCRIBE_CHATS`      | no       | empty, which transcribes nothing | comma-separated chat ids; see [access](../access/README.md)                                                             |
-| `TRANSCRIBE_MODEL_NAME` | no       | `google/gemini-3.5-transcribe`   | Speech-to-Text model id; see [transcription](../transcription/README.md)                                                |
-| `RETENTION_DAYS`        | no       | `30`                             | days of messages, attachments, and delivered outbox rows kept; `0` keeps every row; see [storage](../storage/README.md) |
-| `RUST_LOG`              | no       | `info`                           | console filter only, with no `_FILE` form; see [observability](../observability/README.md)                              |
+| Variable                | Required | Default                          | Purpose                                                                                                                            |
+| ----------------------- | -------- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `TELEGRAM_API_TOKEN`    | yes      | none                             | BotFather token; see [communication](../communication/README.md)                                                                   |
+| `OPENROUTER_API_KEY`    | yes      | none                             | OpenRouter key for Speech-to-Text; see [transcription](../transcription/README.md)                                                 |
+| `DATABASE_PATH`         | yes      | none                             | SQLite file; Compose uses `/opt/data/database.sqlite`; see [storage](../storage/README.md)                                         |
+| `SENTRY_DSN`            | no       | unset                            | error and log reporting; blank disables it; see [observability](../observability/README.md)                                        |
+| `TRANSCRIBE_CHATS`      | no       | empty, which transcribes nothing | comma-separated chat ids; see [access](../access/README.md)                                                                        |
+| `TRANSCRIBE_MODEL_NAME` | no       | `google/gemini-3.5-transcribe`   | Speech-to-Text model id; see [transcription](../transcription/README.md)                                                           |
+| `RETENTION_DAYS`        | no       | `30`                             | days of messages, attachments, and delivered outbox rows kept; `0` keeps every row; see [storage](../storage/README.md)            |
+| `RUST_LOG`              | no       | `info`                           | console filter only, with no `_FILE` form; see [observability](../observability/README.md)                                         |
+| `TZ`                    | no       | system zone                      | local day boundary and clock times for `export`; read by the date library, with no `_FILE` form; see [export](../export/README.md) |
+
+`export` reads `DATABASE_PATH` and `TZ` only. It does not require the bot token, the OpenRouter key, the Sentry DSN, or any transcription setting, so it can run against a copy of the database on another machine. See [export](../export/README.md).
 
 ## Failure policy
 

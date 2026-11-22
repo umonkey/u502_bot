@@ -34,6 +34,8 @@ pub enum Operation {
     OpenRouterRequest,
     /// Decoding the body OpenRouter answered with.
     OpenRouterResponse,
+    /// Converting a civil date to or from an instant in a time zone.
+    TimeZone,
 }
 
 impl fmt::Display for Operation {
@@ -44,6 +46,7 @@ impl fmt::Display for Operation {
             Self::TelegramDownload => "Telegram download failed",
             Self::OpenRouterRequest => "OpenRouter request failed",
             Self::OpenRouterResponse => "failed to decode the OpenRouter response",
+            Self::TimeZone => "time zone conversion failed",
         })
     }
 }
@@ -101,6 +104,14 @@ pub enum Error {
     NoAudioStream { stderr: String },
     /// The extraction did not finish within the configured timeout.
     FfmpegTimeout { seconds: u64 },
+
+    // Export
+    /// The `export` date argument is not a `YYYYMMDD` date.
+    InvalidExportDate(String),
+    /// The database file the export should read does not exist.
+    DatabaseNotFound(PathBuf),
+    /// The directory the export writes into could not be created.
+    CreateExportDirectory { path: PathBuf, source: io::Error },
 }
 
 impl fmt::Display for Error {
@@ -184,6 +195,19 @@ impl fmt::Display for Error {
             Self::FfmpegTimeout { seconds } => {
                 write!(formatter, "ffmpeg did not finish within {seconds} seconds")
             }
+            Self::InvalidExportDate(value) => {
+                write!(formatter, "{value:?} is not a valid YYYYMMDD date")
+            }
+            Self::DatabaseNotFound(path) => {
+                write!(formatter, "database file {} does not exist", path.display())
+            }
+            Self::CreateExportDirectory { path, source } => {
+                write!(
+                    formatter,
+                    "failed to create export directory {}: {source}",
+                    path.display()
+                )
+            }
         }
     }
 }
@@ -194,7 +218,8 @@ impl std::error::Error for Error {
             Self::ReadConfiguration { source, .. }
             | Self::CreateDatabaseDirectory { source, .. }
             | Self::WriteFile { source, .. }
-            | Self::ReadAudioFile { source, .. } => Some(source),
+            | Self::ReadAudioFile { source, .. }
+            | Self::CreateExportDirectory { source, .. } => Some(source),
             Self::External { source, .. } => Some(&**source),
             Self::FfmpegUnavailable(source) | Self::FfmpegIo(source) => Some(source),
             Self::MissingVariable(_)
@@ -207,7 +232,9 @@ impl std::error::Error for Error {
             | Self::AudioTooLarge { .. }
             | Self::FfmpegStatus { .. }
             | Self::NoAudioStream { .. }
-            | Self::FfmpegTimeout { .. } => None,
+            | Self::FfmpegTimeout { .. }
+            | Self::InvalidExportDate(_)
+            | Self::DatabaseNotFound(_) => None,
         }
     }
 }
@@ -287,6 +314,40 @@ mod tests {
     }
 
     #[test]
+    fn invalid_export_date_quotes_the_value() {
+        let error = Error::InvalidExportDate("2026-11-22".to_owned());
+
+        assert_eq!(
+            error.to_string(),
+            "\"2026-11-22\" is not a valid YYYYMMDD date"
+        );
+    }
+
+    #[test]
+    fn missing_database_names_the_path() {
+        let error = Error::DatabaseNotFound(PathBuf::from("/opt/data/database.sqlite"));
+
+        assert_eq!(
+            error.to_string(),
+            "database file /opt/data/database.sqlite does not exist"
+        );
+    }
+
+    #[test]
+    fn uncreatable_export_directory_names_the_cause() {
+        let error = Error::CreateExportDirectory {
+            path: PathBuf::from("/opt/data/export"),
+            source: io::Error::new(io::ErrorKind::PermissionDenied, "permission denied"),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "failed to create export directory /opt/data/export: permission denied"
+        );
+        assert!(std::error::Error::source(&error).is_some());
+    }
+
+    #[test]
     fn each_operation_renders_a_distinct_message() {
         let operations = [
             Operation::Database,
@@ -294,6 +355,7 @@ mod tests {
             Operation::TelegramDownload,
             Operation::OpenRouterRequest,
             Operation::OpenRouterResponse,
+            Operation::TimeZone,
         ];
         let messages: HashSet<String> = operations
             .iter()

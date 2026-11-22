@@ -29,6 +29,7 @@ make check        # lint + test
 make tags         # ctags index (requires universal-ctags)
 make format-docs  # prettier on all Markdown (requires Node/npx)
 TELEGRAM_API_TOKEN=... OPENROUTER_API_KEY=... TRANSCRIBE_CHATS=... DATABASE_PATH=... cargo run -- start
+DATABASE_PATH=... cargo run -- export [YYYYMMDD] [CHAT_ID] --out DIR
 ```
 
 Running `make` without a target executes `check`.
@@ -39,12 +40,13 @@ Running `make` without a target executes `check`.
 - `src/main.rs`: entry point; calls `cli::run()`.
 - `src/cli/mod.rs`: defines the clap `Command` enum, parses arguments, and routes each variant.
 - `src/cli/<command>.rs`: one module per subcommand; `src/cli/start.rs` composes the clients, the repositories, and the services.
+- `src/cli/export.rs`: the one-shot export command; it reads one local day from the repository, writes one Markdown file per chat, and initializes neither tracing nor Sentry.
 - `src/domains.rs`: declares the domain modules and `InsertOutcome`, the answer both idempotent inserts share.
 - `src/domains/attachment.rs`: the attachment model and the repository that owns the `attachments` SQL, including the pending scan and the processed flag.
 - `src/domains/message.rs`: the message model and the repository that owns the `messages` SQL and the one transaction that also writes a message's attachment.
 - `src/domains/outbox.rs`: the outbox model and the repository that owns the `outbox` SQL.
 - `src/infra.rs`: declares the infra modules.
-- `src/infra/config.rs`: `Settings`, `Whitelist`, `DEFAULT_TRANSCRIBE_MODEL`, and `DEFAULT_RETENTION_DAYS`; the only place the environment is read, one resolver gives every variable the same form: `<NAME>_FILE` first, then `<NAME>`, the value trimmed, blank meaning unset, UTF-8 only. One failure policy covers every field: absence is fatal only for the required values, absence of an optional value takes its default, and a present but unusable value fails startup.
+- `src/infra/config.rs`: `Settings`, `Whitelist`, `DEFAULT_TRANSCRIBE_MODEL`, and `DEFAULT_RETENTION_DAYS`; the only place the environment is read, one resolver gives every variable the same form: `<NAME>_FILE` first, then `<NAME>`, the value trimmed, blank meaning unset, UTF-8 only. One failure policy covers every field: absence is fatal only for the required values, absence of an optional value takes its default, and a present but unusable value fails startup. `database_path` resolves the one variable `export` needs. `TZ` is the one variable this crate does not resolve: `jiff` reads it inside `TimeZone::try_system()` for `export`, as `tracing_subscriber` reads `RUST_LOG`, and it has no `_FILE` form.
 - `src/infra/database.rs`: `Database` and `SCHEMA`; the async SQLite client, which opens a pool of connections and applies the embedded schema without knowing any table.
 - `src/infra/ffmpeg.rs`: `Ffmpeg`; the client for the `ffmpeg` program, which extracts a video's first audio track to Ogg/Opus under a timeout, kills the child on drop, and records its own call telemetry. The program is the `ffmpeg` on `PATH`.
 - `src/infra/openrouter.rs`: `OpenRouter` and `AudioFormat`; the Speech-to-Text client for audio transcription, built from the key and the model the composition root resolved, which records its own call telemetry. It refuses audio above its own 20 MB input cap and builds the request body by encoding the file in chunks straight into one preallocated buffer, so a request peaks at the body rather than at several copies of the input.
@@ -60,6 +62,7 @@ Running `make` without a target executes `check`.
 - `src/services/pruner.rs`: the hourly retention pass; it deletes delivered outbox rows, then attachments, then messages in bounded batches, in that order.
 - `src/shared.rs` / `src/shared/result.rs`: the crate-wide `Error` enum, with one variant per failure mode the bot can produce, and the `Result<T>` alias every fallible function returns; any layer may use them.
 - `src/shared/config.rs`: `VariableName`, the enum naming every environment variable, and `SentryDsn`, the destination or the reason reporting is off; resolution stays in `src/infra/config.rs`.
+- `src/shared/day.rs`: `Day`, the export date policy; it parses `YYYYMMDD`, computes the half-open local-day epoch bounds, and renders `HH:MM`, with jiff owning the zone arithmetic.
 - `src/shared/metrics.rs`: `MetricName`, the enum naming every application metric the bot records, with the exact Sentry wire name behind `as_str`; recording stays in `src/infra/sentry.rs`, which owns the client.
 - `src/shared/text.rs`: `truncate` and `MAX_ERROR_BODY`, the one policy for how much of an external error body reaches the logs; the OpenRouter and ffmpeg clients use it.
 - `dev/schema.sql`: initial SQLite schema, embedded at build time and applied on every startup.
@@ -96,7 +99,7 @@ Add every new subcommand as a variant of the `Command` enum in `src/cli/mod.rs`,
 
 The image uses a two-stage build: `rust:1-slim-trixie` compiles the release binary, and `debian:trixie-slim` runs it with `supervisor` and `cron`.
 
-The runtime image includes the `sqlite3` CLI so the database inside the container can be inspected, and `ffmpeg` so video can be transcribed; the schema file itself is not shipped because it is compiled into the binary.
+The runtime image includes the `sqlite3` CLI so the database inside the container can be inspected, `ffmpeg` so video can be transcribed, and the `tzdata` zone database so `export` can resolve names such as `Europe/Moscow`; the schema file itself is not shipped because it is compiled into the binary.
 
 `supervisord` is PID 1. It supervises `cron -f` as root and the bot as the unprivileged `u502` user.
 
@@ -141,6 +144,7 @@ Architecture decisions live in `docs/adr/`, one Markdown file per decision, name
 - ADR 0014 records the decision to resolve configuration into a typed `Settings`.
 - ADR 0015 records the decision to bound transcription memory and keep filesystem calls off the async runtime.
 - ADR 0016 records the decision to bound the stored rows with a retention and a pruning service.
+- ADR 0017 records the decision to export one local day of a chat to Markdown.
 
 Run `make format-docs` after editing anything under `docs/`.
 
@@ -216,6 +220,8 @@ Sentry receives every `ERROR`-level `tracing` event and every panic as an issue,
 The transcriber records `telegram.attachments.transcribed` once per attachment it finishes with, whether transcribed, silent, or skipped, and `outbox.messages.added` once per queued chunk. The outbox service records `outbox.messages.sent` once per row Telegram accepted, so the gap between added and sent is the number of replies not yet delivered; it also records `transcription.reply.latency`, in seconds, for every first reply chunk, from the Telegram send time of the source message to the moment Telegram accepts the reply. The pruner records `telegram.messages.pruned`, `telegram.attachments.pruned`, and `outbox.messages.pruned`, one increment per deleted row, and a statement that deletes nothing records nothing. The OpenRouter client records `openrouter.calls` and `openrouter.duration` for every call, successful or not, and `openrouter.tokens.input`, `openrouter.tokens.output`, and `openrouter.cost_micro_usd` from the usage OpenRouter reports; cost is in micro-USD. The ffmpeg client records `ffmpeg.calls` and `ffmpeg.duration` for every extraction, successful or timed out, so the video path is visible even when it never reaches the model. Startup logs `Using model <id> to transcribe; override with TRANSCRIBE_MODEL_NAME` once, so the model that spends the credits is visible both in the console and in Sentry's structured logs.
 
 The reported logs include message text, transcripts, chat ids, sender names, file ids, MIME types, and file names. `send_default_pii` stays off, so the SDK adds no automatic enrichment, and no metric carries attributes. The DSN, the bot token, and the OpenRouter key are never logged. Without a DSN the integration is disabled and the bot logs a single warning; see Secrets.
+
+`export` is outside this reporting: it initializes neither logging nor Sentry, writes the exported paths to standard output, and reports a failure on standard error with a non-zero exit status.
 
 ## Out of scope
 

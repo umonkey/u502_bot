@@ -5,7 +5,7 @@
 //! [`NewMessage`] before storing. [`insert`] and [`MessageRepository::store`] must stay in sync with
 //! both tables in `dev/schema.sql`.
 
-use sqlx::{SqliteConnection, SqlitePool};
+use sqlx::{Row, SqliteConnection, SqlitePool};
 
 use crate::domains::InsertOutcome;
 use crate::domains::attachment::{self, NewAttachment};
@@ -35,6 +35,19 @@ pub struct StoreOutcome {
     pub message: InsertOutcome,
     /// What happened to the `attachments` row, when the message carried media.
     pub attachment: Option<InsertOutcome>,
+}
+
+/// One stored message as the export renders it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportedMessage {
+    /// Telegram message id, unique within its chat.
+    pub message_id: i64,
+    /// Telegram send time as Unix epoch seconds, UTC.
+    pub received_at: i64,
+    /// Display name of the sender, when the update carried one.
+    pub sender_name: Option<String>,
+    /// Message text or caption; never empty, because the query skips NULL rows.
+    pub text: String,
 }
 
 /// Writes an arriving message and its attachment together.
@@ -109,6 +122,57 @@ impl MessageRepository {
 
         Ok(deleted)
     }
+
+    /// Lists the distinct chats that received a message in `[start, end)`, ascending.
+    ///
+    /// Served by the `messages_received_at` index; a day's rows are small enough that filtering by
+    /// chat afterwards is cheaper than a second index.
+    pub async fn chat_ids_between(&self, start: i64, end: i64) -> Result<Vec<i64>> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT chat_id FROM messages \
+             WHERE received_at >= ? AND received_at < ? \
+             ORDER BY chat_id",
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().map(|row| row.get("chat_id")).collect())
+    }
+
+    /// Reads one chat's renderable messages in `[start, end)`, oldest first.
+    ///
+    /// Rows whose `message` is NULL cannot be rendered and are skipped; captions share that column,
+    /// so only genuinely text-less rows are omitted.
+    pub async fn messages_between(
+        &self,
+        chat_id: i64,
+        start: i64,
+        end: i64,
+    ) -> Result<Vec<ExportedMessage>> {
+        let rows = sqlx::query(
+            "SELECT message_id, received_at, sender_name, message FROM messages \
+             WHERE chat_id = ? AND received_at >= ? AND received_at < ? \
+               AND message IS NOT NULL \
+             ORDER BY received_at, message_id",
+        )
+        .bind(chat_id)
+        .bind(start)
+        .bind(end)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| ExportedMessage {
+                message_id: row.get("message_id"),
+                received_at: row.get("received_at"),
+                sender_name: row.get("sender_name"),
+                text: row.get("message"),
+            })
+            .collect())
+    }
 }
 
 /// Inserts one row on the caller's connection, so the caller can insert inside its own transaction.
@@ -144,8 +208,6 @@ pub(crate) async fn insert(
 
 #[cfg(test)]
 mod tests {
-    use sqlx::Row;
-
     use crate::domains::attachment::{AttachmentKind, AttachmentRepository};
     use crate::infra::database::Database;
 
@@ -188,6 +250,30 @@ mod tests {
             .fetch_one(&repository.pool)
             .await
             .expect("count should succeed")
+    }
+
+    async fn store_message(
+        repository: &MessageRepository,
+        chat_id: i64,
+        message_id: i64,
+        received_at: i64,
+        sender_name: Option<&str>,
+        text: Option<&str>,
+    ) {
+        repository
+            .store(
+                &NewMessage {
+                    chat_id,
+                    message_id,
+                    received_at,
+                    sender_id: None,
+                    sender_name: sender_name.map(str::to_owned),
+                    text: text.map(str::to_owned),
+                },
+                None,
+            )
+            .await
+            .expect("the message should store");
     }
 
     async fn message_ids(repository: &MessageRepository) -> Vec<i64> {
@@ -584,5 +670,86 @@ mod tests {
         .await
         .expect("join should succeed");
         assert_eq!(joined, 2);
+    }
+
+    #[tokio::test]
+    async fn chat_ids_between_returns_distinct_ascending_ids_inside_the_range() {
+        let repository = in_memory_repository().await;
+        store_message(&repository, 42, 1, 100, Some("Ada"), Some("first")).await;
+        store_message(&repository, 7, 2, 200, None, Some("second")).await;
+        store_message(&repository, 42, 3, 300, None, Some("third")).await;
+        store_message(&repository, 9, 4, 400, None, Some("at the end")).await;
+
+        let chats = repository
+            .chat_ids_between(100, 400)
+            .await
+            .expect("the chat ids should load");
+
+        assert_eq!(chats, vec![7, 42]);
+    }
+
+    #[tokio::test]
+    async fn messages_between_orders_and_skips_text_less_rows() {
+        let repository = in_memory_repository().await;
+        store_message(&repository, 42, 9, 300, Some("Ada"), Some("later")).await;
+        store_message(&repository, 42, 8, 200, None, Some("earlier")).await;
+        store_message(
+            &repository,
+            42,
+            7,
+            200,
+            Some("Ada"),
+            Some("first of the same second"),
+        )
+        .await;
+        store_message(&repository, 7, 1, 200, Some("Bob"), Some("other chat")).await;
+        store_message(&repository, 42, 10, 200, Some("Ada"), None).await;
+
+        let messages = repository
+            .messages_between(42, 100, 400)
+            .await
+            .expect("the messages should load");
+
+        assert_eq!(
+            messages,
+            vec![
+                ExportedMessage {
+                    message_id: 7,
+                    received_at: 200,
+                    sender_name: Some("Ada".to_owned()),
+                    text: "first of the same second".to_owned(),
+                },
+                ExportedMessage {
+                    message_id: 8,
+                    received_at: 200,
+                    sender_name: None,
+                    text: "earlier".to_owned(),
+                },
+                ExportedMessage {
+                    message_id: 9,
+                    received_at: 300,
+                    sender_name: Some("Ada".to_owned()),
+                    text: "later".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn messages_between_includes_start_and_excludes_end() {
+        let repository = in_memory_repository().await;
+        store_message(&repository, 42, 1, 100, None, Some("at the start")).await;
+        store_message(&repository, 42, 2, 399, None, Some("inside")).await;
+        store_message(&repository, 42, 3, 400, None, Some("at the end")).await;
+
+        let ids: Vec<i64> = repository
+            .messages_between(42, 100, 400)
+            .await
+            .expect("the messages should load")
+            .into_iter()
+            .map(|message| message.message_id)
+            .collect();
+
+        assert_eq!(ids, vec![1, 2]);
     }
 }

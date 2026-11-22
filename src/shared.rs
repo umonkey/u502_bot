@@ -2,6 +2,7 @@
 //! or a loop, and nothing here names a layer above it.
 
 pub mod config;
+pub mod day;
 pub mod metrics;
 pub mod result;
 pub mod text;

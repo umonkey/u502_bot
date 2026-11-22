@@ -13,8 +13,9 @@
 //!
 //! `Ok(None)` means the variable is not configured. This module is also the only place the
 //! environment is read: [`Settings::load`] resolves everything once at startup, and absence is fatal
-//! only for the fields startup cannot run without. `RUST_LOG` is the one exception:
-//! `tracing_subscriber`'s `EnvFilter` reads it, not this crate, and it has no file form.
+//! only for the fields startup cannot run without. `RUST_LOG` and `TZ` are the two exceptions:
+//! `tracing_subscriber`'s `EnvFilter` reads the first and `jiff` reads the second inside
+//! `TimeZone::try_system()` for `export`, not this crate, and neither has a file form.
 
 use std::collections::HashSet;
 use std::env::VarError;
@@ -76,6 +77,17 @@ impl Settings {
 /// Resolves the DSN without failing: ADR 0004 keeps observability from stopping the bot.
 pub async fn sentry_dsn() -> SentryDsn {
     classify_dsn(get_optional(VariableName::SentryDsn).await)
+}
+
+/// Resolves the one path `export` needs, without requiring the bot's secrets.
+pub async fn database_path() -> Result<PathBuf> {
+    database_path_from_lookup(get_optional).await
+}
+
+async fn database_path_from_lookup(
+    lookup: impl AsyncFn(VariableName) -> Result<Option<String>>,
+) -> Result<PathBuf> {
+    Ok(require(&lookup, VariableName::DatabasePath).await?.into())
 }
 
 /// Turns a DSN resolution into a destination or the reason reporting is off.
@@ -285,6 +297,35 @@ mod tests {
 
         assert!(matches!(
             settings_error(&values).await,
+            Error::MissingVariable(VariableName::DatabasePath)
+        ));
+    }
+
+    #[tokio::test]
+    async fn database_path_resolves_for_export() {
+        let path = database_path_from_lookup(async |name| {
+            Ok((name == VariableName::DatabasePath).then(|| "/tmp/u502.sqlite".to_owned()))
+        })
+        .await
+        .expect("a database path should resolve");
+
+        assert_eq!(path, PathBuf::from("/tmp/u502.sqlite"));
+    }
+
+    #[tokio::test]
+    async fn an_absent_database_path_fails_for_export() {
+        let error = database_path_from_lookup(async |name| {
+            if name == VariableName::DatabasePath {
+                Ok(None)
+            } else {
+                Ok(Some("value".to_owned()))
+            }
+        })
+        .await
+        .expect_err("an absent database path should fail");
+
+        assert!(matches!(
+            error,
             Error::MissingVariable(VariableName::DatabasePath)
         ));
     }
